@@ -9,7 +9,7 @@ export default async function AdminLayout({
 }) {
     const user = await getUser()
     const supabase = await createClient()
-    
+
     // Get user data for display (already checked in parent layout)
     const { data: userData } = await supabase
         .from('users')
@@ -31,12 +31,14 @@ export default async function AdminLayout({
                 justifyContent: 'space-between',
                 alignItems: 'center'
             }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <Shield style={{ width: 20, height: 20, color: '#6366f1' }} />
-                        <span style={{ color: 'white', fontSize: 18, fontWeight: 600 }}>Admin Panel</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <Shield style={{ width: 20, height: 20, color: '#6366f1' }} />
+                    <span style={{ color: 'white', fontSize: 18, fontWeight: 600 }}>Admin Panel</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ color: '#71717a', fontSize: 13 }}>{userData.full_name || userData.email}</span>
+                    <span style={{ color: '#71717a', fontSize: 13 }}>
+                        {userData?.full_name || userData?.email || 'Admin'}
+                    </span>
                 </div>
             </header>
 
