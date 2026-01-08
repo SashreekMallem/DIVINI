@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# sensitive info
+ADMIN_CREDENTIALS.md
+create-admin.js
+package-lock 2.json
+env.example
