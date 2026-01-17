@@ -33,6 +33,7 @@ import {
     type SessionMemory,
     type MultiRoundMemory
 } from '@/lib/utils/smartContextManager'
+import { useDeepgram } from '@/lib/hooks/useDeepgram'
 
 interface CoachingEntry {
     id: string
@@ -63,7 +64,8 @@ export default function InterviewSessionPage() {
     const [isRecording, setIsRecording] = useState(false)
     const [elapsedTime, setElapsedTime] = useState(0)
     const [error, setError] = useState<string | null>(null)
-    const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected')
+    // const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected') // Replaced by hook
+
     const [showContext, setShowContext] = useState(false)
     const [isStealthMode, setIsStealthMode] = useState(false)
 
@@ -125,15 +127,8 @@ export default function InterviewSessionPage() {
 
     const cleanup = () => {
         if (timerRef.current) clearInterval(timerRef.current)
-        if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-            socketRef.current.close()
-        }
-        if (audioContextRef.current) {
-            audioContextRef.current.close()
-        }
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop())
-        }
+        disconnect() // Use hook's disconnect
+        // screenShareManager handled separately
     }
 
     const loadInterview = async () => {
@@ -470,320 +465,111 @@ export default function InterviewSessionPage() {
         } finally {
             setIsGenerating(false)
         }
-    }, [isGenerating, resume, jobDescription, company, interview, coaching, transcriptSegments, multiRoundContext])
+    }, [isGenerating, resume, jobDescription, company, interview, coaching, transcriptSegments, multiRoundMemory])
+
+    // SERVERLESS ARCHITECTURE: Use Deepgram Hook (Direct Client -> Deepgram)
+    const { connect, startStreaming, disconnect, status: connectionStatus } = useDeepgram({
+        onTranscript: (text, isFinal, speaker) => {
+            if (isFinal) {
+                const segmentId = `${Date.now()}-${speaker}`
+                setTranscriptSegments(prev => {
+                    const last = prev[prev.length - 1]
+                    if (last && last.text === text && last.speaker === speaker) return prev
+                    return [...prev, {
+                        id: segmentId,
+                        speaker,
+                        text,
+                        timestamp: Date.now()
+                    }]
+                })
+                setTranscript(prev => prev + (prev ? '\n' : '') + `${speaker}: ${text}`)
+                setPartialTranscript('') // Clear partial on final
+
+                // Save to DB
+                const dbSpeaker = speaker === 'You' ? 'candidate' : 'interviewer'
+                saveTranscriptSegment(text, dbSpeaker)
+            } else {
+                setPartialTranscript(text)
+            }
+
+            // Auto-scroll
+            if (transcriptRef.current) {
+                transcriptRef.current.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: 'smooth' })
+            }
+        },
+        onUtteranceEnd: () => {
+            // Trigger Gemini on UtteranceEnd (Speech stopped)
+            // accessing state directly here might be stale if not careful, 
+            // but we can use the transcript saved in state or passed in callback?
+            // Actually, page.tsx doesn't track accumulated transcript well outside of segments.
+            // Let's rely on the fact that if UtteranceEnd fires, the last "final" transcript was the end.
+            // A better way is to pass the text to onUtteranceEnd in the hook, but for now let's just trigger logic.
+            // We'll use a ref to track the last final text if needed, or just let 'detectQuestion' run on latest segment?
+            // Simplified: The previous logic triggered generateAnswer(accumulatedTranscript).
+            // Let's modify useDeepgram to return the current transcript/utterance?
+            // Or simpler: Just rely on the last segment added.
+
+            // NOTE: Ideally we want to pass the text that just ended. 
+            // For now, let's look at the last added segment.
+            setTranscriptSegments(prev => {
+                const last = prev[prev.length - 1]
+                if (last && last.speaker === 'Interviewer' && detectQuestion(last.text)) {
+                    console.log('⚡ Detected question (Serverless) - Triggering Gemini!')
+                    generateAnswer(last.text)
+                } else if (last && last.speaker === 'You') {
+                    // Check if 'You' asked a question (maybe self-practice?)
+                    // Usually we only trigger on Interviewer, but if using Mic-only mode, 'You' might be roleplaying.
+                    // The original logic checked if speaker === 'Interviewer' OR !useSystemAudio.
+                    if (!useSystemAudio && detectQuestion(last.text)) {
+                        console.log('⚡ Detected question (Mic Only) - Triggering Gemini!')
+                        generateAnswer(last.text)
+                    }
+                }
+                return prev
+            })
+        },
+        onError: (err) => {
+            setError(err)
+            // setConnectionStatus('disconnected') // Managed by hook
+        }
+    })
 
     const startRecording = async () => {
         setError(null)
-        setConnectionStatus('connecting')
         setShowAudioSettings(false)
 
         try {
-            // 1. Get Microphone Stream (Candidate)
-            const micStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
-                    sampleRate: 16000,
-                    channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true
-                }
-            })
-
-            let finalStream = micStream
-
-            // 2. Get System Audio Stream (Interviewer) if enabled
-            if (useSystemAudio) {
-                try {
-                    // Show instruction before requesting screen share
-                    const userConfirmed = window.confirm(
-                        'To capture the interviewer\'s audio, you need to share your screen/tab.\n\n' +
-                        '1. Click "Share" in the browser dialog\n' +
-                        '2. Select the TAB where the interview is happening (Zoom, Teams, etc.)\n' +
-                        '3. Make sure "Share tab audio" is checked\n\n' +
-                        'Click OK to continue...'
-                    )
-
-                    if (!userConfirmed) {
-                        setUseSystemAudio(false)
-                        setError('System audio capture cancelled. Continuing with microphone only.')
-                        // Continue with just microphone
-                    } else {
-                        const displayStream = await navigator.mediaDevices.getDisplayMedia({
-                            video: true, // Required to get audio in most browsers
-                            audio: {
-                                echoCancellation: false,
-                                noiseSuppression: false,
-                                autoGainControl: false,
-                            }
-                        })
-
-                        // We only want audio, stop video track immediately to save resources
-                        displayStream.getVideoTracks().forEach(track => track.stop())
-
-                        if (displayStream.getAudioTracks().length > 0) {
-                            // MERGE STREAMS: Left = Mic, Right = System
-                            const audioContext = new AudioContext({ sampleRate: 16000 })
-                            audioContextRef.current = audioContext
-
-                            const micSource = audioContext.createMediaStreamSource(micStream)
-                            const sysSource = audioContext.createMediaStreamSource(new MediaStream([displayStream.getAudioTracks()[0]]))
-
-                            const merger = audioContext.createChannelMerger(2)
-
-                            // Connect Mic to Channel 0 (Left)
-                            micSource.connect(merger, 0, 0)
-
-                            // Connect System to Channel 1 (Right)
-                            sysSource.connect(merger, 0, 1) // 0 is input index, 1 is output channel
-
-                            const dest = audioContext.createMediaStreamDestination()
-                            merger.connect(dest)
-
-                            finalStream = dest.stream
-
-                            // IMPORTANT: Force channel count to 2
-                            console.log('Dual Channel Stream Created:', finalStream.getAudioTracks()[0].getSettings().channelCount)
-                        } else {
-                            console.warn('System audio not captured, falling back to mono mic')
-                            setError('System audio track not found. Make sure to check "Share tab audio" in the browser dialog.')
-                        }
-                    }
-                } catch (sysErr) {
-                    console.error('Failed to get system audio:', sysErr)
-                    setUseSystemAudio(false)
-                    setError('Could not capture system audio. Make sure to:\n1. Select the correct tab/window\n2. Check "Share tab audio"\n3. Click "Share". Continuing with microphone only.')
-                }
-            }
-
-            streamRef.current = finalStream
-
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-            // Append dual_channel flag if system audio is used
-            const wsUrl = `${wsProtocol}//${window.location.host}/api/transcribe-ws${useSystemAudio ? '?dual_channel=true' : ''}`
-
-            const socket = new WebSocket(wsUrl)
-            socketRef.current = socket
-
-            socket.onopen = () => {
-                console.log('Connected to transcription proxy')
-                setConnectionStatus('connected')
-            }
-
-            socket.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data)
-
-                    // =====================================================
-                    // DEEPGRAM NORMALIZED MESSAGE HANDLER
-                    // Based on Retell/Vapi architecture research
-                    // =====================================================
-
-                    if (data.type === 'connected') {
-                        console.log('✅ WebSocket connected to transcription proxy')
-                        console.log('   Provider:', data.provider || 'unknown')
-                        setIsRecording(true)
-                        timerRef.current = setInterval(() => setElapsedTime(prev => prev + 1), 1000)
-
-                        supabase.from('interviews').update({
-                            session_status: 'in_progress',
-                            started_at: new Date().toISOString()
-                        }).eq('id', params.id)
-
-                        if (streamRef.current) {
-                            console.log('🎙️ Starting audio processing...')
-                            startAudioProcessing(streamRef.current, socket)
-                        }
-                    }
-
-                    // PARTIAL & FINAL TRANSCRIPTS (interim_results from Deepgram)
-                    else if (data.type === 'transcript') {
-                        const transcript = data.transcript?.trim() || ''
-                        const isFinal = data.is_final === true
-                        const speechFinal = data.speech_final === true
-                        const speaker = data.speaker === 'interviewer' ? 'Interviewer' : 'You'
-
-                        if (transcript) {
-                            console.log(`📨 [${isFinal ? 'FINAL' : 'interim'}] speech_final=${speechFinal} | ${speaker}: "${transcript.substring(0, 50)}..."`)
-                        }
-
-                        // Show partial transcripts as "Listening..." text
-                        if (!isFinal && transcript) {
-                            setPartialTranscript(transcript)
-                        }
-
-                        // On final transcript, save to segments
-                        if (isFinal && transcript) {
-                            // Check if we already have this exact segment to avoid duplicates
-                            const segmentId = `${Date.now()}-${speaker}`
-
-                            setTranscriptSegments(prev => {
-                                // Avoid duplicate if last segment has same text
-                                const last = prev[prev.length - 1]
-                                if (last && last.text === transcript && last.speaker === speaker) {
-                                    return prev
-                                }
-                                return [...prev, {
-                                    id: segmentId,
-                                    speaker: speaker as 'You' | 'Interviewer',
-                                    text: transcript,
-                                    timestamp: Date.now()
-                                }]
-                            })
-
-                            setTranscript(prev => prev + (prev ? '\n' : '') + `${speaker}: ${transcript}`)
-                            setPartialTranscript('')
-
-                            // Save to DB (async)
-                            const dbSpeaker = speaker === 'You' ? 'candidate' : 'interviewer'
-                            saveTranscriptSegment(transcript, dbSpeaker)
-                        }
-
-                        // Auto-scroll
-                        setTimeout(() => {
-                            transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: 'smooth' })
-                        }, 100)
-                    }
-
-                    // UTTERANCE END - The speaker finished their thought
-                    // This is the CRITICAL event for triggering Gemini
-                    else if (data.type === 'utterance_end') {
-                        const transcript = data.transcript?.trim() || ''
-                        const speaker = data.speaker === 'interviewer' ? 'Interviewer' : 'You'
-
-                        console.log(`🎯 UTTERANCE END | ${speaker}: "${transcript.substring(0, 60)}..."`)
-
-                        // Clear partial transcript since speech ended
-                        setPartialTranscript('')
-
-                        // TRIGGER GEMINI if interviewer asked a question
-                        // Only trigger on interviewer speech OR all speech if using mono (no dual channel)
-                        const shouldTrigger = speaker === 'Interviewer' || !useSystemAudio
-
-                        if (shouldTrigger && transcript && detectQuestion(transcript)) {
-                            console.log(`⚡ Detected question - Triggering Gemini NOW!`)
-                            generateAnswer(transcript)
-                        }
-                    }
-
-                    // SPEECH STARTED - User began speaking
-                    else if (data.type === 'speech_started') {
-                        console.log('🔊 Speech started detected')
-                        // Could be used to show "speaking" indicator
-                    }
-
-                    // SESSION STARTED (AssemblyAI legacy)
-                    else if (data.type === 'session_started' || data.type === 'Begin') {
-                        console.log('🚀 Transcription session started')
-                    }
-
-                    // ERROR
-                    else if (data.type === 'error') {
-                        console.error('❌ Transcription error:', data.message)
-                        setError(data.message || 'Transcription error')
-                    }
-
-                } catch (e) {
-                    console.error('Error parsing WS message:', e)
-                }
-            }
-
-            socket.onerror = () => {
-                setConnectionStatus('disconnected')
-                setError('Connection error. Make sure server is running with: npm run dev:ws')
-            }
-
-            socket.onclose = () => {
-                setConnectionStatus('disconnected')
-                if (isRecording) setIsRecording(false)
-            }
-
-        } catch (err: any) {
-            console.error('Error starting recording:', err)
-            setConnectionStatus('disconnected')
-            setError(err.message || 'Could not start recording')
+            await connect()
+        } catch (e: any) {
+            setError(e.message)
         }
     }
 
-    const startAudioProcessing = async (stream: MediaStream, socket: WebSocket) => {
-        try {
-            const audioContext = new AudioContext({ sampleRate: 16000 })
-            audioContextRef.current = audioContext
+    // Effect to start streaming once connected
+    useEffect(() => {
+        if (connectionStatus === 'connected' && !isRecording) {
+            console.log('🎙️ Starting audio streaming (Serverless)...')
+            startStreaming(selectedMicId)
+            setIsRecording(true)
+            timerRef.current = setInterval(() => setElapsedTime(prev => prev + 1), 1000)
 
-            // Load AudioWorklet for modern, efficient audio processing
-            await audioContext.audioWorklet.addModule('/audio-worklet-processor.js')
-
-            const source = audioContext.createMediaStreamSource(stream)
-
-            // Determine channel count from stream
-            const channelCount = stream.getAudioTracks()[0].getSettings().channelCount || 1
-            console.log('AudioWorklet processing channels:', channelCount)
-
-            const workletNode = new AudioWorkletNode(audioContext, 'pcm-processor', {
-                numberOfInputs: 1,
-                outputChannelCount: [channelCount], // Match input
-                channelCount: channelCount,
-                channelCountMode: 'explicit'
-            })
-
-            // Handle messages from the AudioWorklet
-            let audioChunkCount = 0
-            workletNode.port.onmessage = (event) => {
-                const { type, buffer, speaking, rms } = event.data
-
-                if (type === 'audio' && socket.readyState === WebSocket.OPEN) {
-                    // Send PCM16 audio data to AssemblyAI
-                    audioChunkCount++
-                    if (audioChunkCount % 20 === 0) { // Log every 20 chunks (~1 second at 50ms chunks)
-                        console.log(`📤 Audio chunk #${audioChunkCount} sent (${buffer.byteLength} bytes)`)
-                    }
-                    socket.send(buffer)
-                } else if (type === 'vad') {
-                    // Voice Activity Detection status update
-                    if (speaking) {
-                        console.log('🎤 Speaking detected - RMS:', rms?.toFixed(4))
-                    }
-                }
-            }
-
-            source.connect(workletNode)
-            // Note: We don't connect to destination - just processing, not playback
-
-        } catch (err) {
-            console.error('Audio processing error:', err)
-            // Fallback to deprecated ScriptProcessorNode if AudioWorklet fails
-            console.warn('Falling back to ScriptProcessorNode')
-            startLegacyAudioProcessing(stream, socket)
-        }
-    }
-
-    // Legacy fallback for browsers without AudioWorklet support
-    const startLegacyAudioProcessing = (stream: MediaStream, socket: WebSocket) => {
-        const audioContext = new AudioContext({ sampleRate: 16000 })
-        audioContextRef.current = audioContext
-
-        const source = audioContext.createMediaStreamSource(stream)
-        const processor = audioContext.createScriptProcessor(4096, 1, 1)
-
-        processor.onaudioprocess = (e) => {
-            if (socket.readyState === WebSocket.OPEN) {
-                const inputData = e.inputBuffer.getChannelData(0)
-                const int16Data = new Int16Array(inputData.length)
-                for (let i = 0; i < inputData.length; i++) {
-                    const s = Math.max(-1, Math.min(1, inputData[i]))
-                    int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
-                }
-                socket.send(int16Data.buffer)
+            if (interview?.id) {
+                supabase.from('interviews').update({
+                    session_status: 'in_progress',
+                    started_at: new Date().toISOString()
+                }).eq('id', interview.id)
             }
         }
+    }, [connectionStatus, isRecording, startStreaming, selectedMicId, interview?.id, supabase])
 
-        source.connect(processor)
-        processor.connect(audioContext.destination)
-    }
+    // Note: Legacy audio processing functions removed in favor of useDeepgram hook
+
 
     const endInterview = async () => {
         cleanup()
         setIsRecording(false)
-        setConnectionStatus('disconnected')
+        setIsRecording(false)
+        // setConnectionStatus('disconnected') // Managed by hook
 
         // FLUSH PARTIAL TRANSCRIPT: If there's pending text, save it as a final segment
         if (partialTranscript.trim()) {
