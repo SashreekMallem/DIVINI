@@ -20,21 +20,35 @@ export async function GET() {
             return NextResponse.json({ error: 'Server configuration error' }, { status: 500 })
         }
 
-        // 3. (TEMPORARY) Return Static Key directly
-        // Reason: The provided API key does not have 'keys:write' or 'member' permissions to generate temporary keys.
-        // Fallback: We return the static key so the client can connect. 
-        // WARNING: This exposes the long-lived API key to the client. Ideally, replace this with the logic below once an Admin key is provided.
+        // 3. Generate Ephemeral Key (valid for 10 seconds)
+        // We use a short expiration because the key is only needed to establish the WebSocket connection.
+        // Once connected, the socket stays open even if the key expires.
+        const response = await fetch('https://api.deepgram.com/v1/projects/ba62b293-be5c-434f-8f86-9881f5315a05/keys', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                comment: `Ephemeral key for user ${user.id}`,
+                scopes: ['usage:write'], // Minimum scope needed
+                tags: ['web-client'],
+                time_to_live_in_seconds: 10
+            })
+        })
 
-        /* 
-        // SECURE IMPLEMENTATION (Requires Admin/Member Key):
-        const response = await fetch('https://api.deepgram.com/v1/projects/.../keys', { ... })
-        */
+        if (!response.ok) {
+            const errorText = await response.text()
+            console.error('Deepgram API Error:', errorText)
+            throw new Error(`Failed to generate key: ${response.statusText}`)
+        }
 
-        console.warn('⚠️ Using static Deepgram key (Permissions Restricted)')
+        const data = await response.json()
 
+        // Deepgram returns { key_id, key, ... }
         return NextResponse.json({
-            key: DEEPGRAM_API_KEY,
-            // project_id: '...' // Optional
+            key: data.key,
+            project_id: data.project_id
         })
 
     } catch (error: any) {
