@@ -1,5 +1,11 @@
-// Custom server for WebSocket proxy to AssemblyAI
+// Custom server for WebSocket proxy to Deepgram STT
 // Run with: npm run dev:ws
+//
+// Architecture based on Retell/Vapi research:
+// - Uses Deepgram for real-time STT with proper endpointing
+// - utterance_end_ms: Detects when speaker stopped talking
+// - endpointing: Finalizes transcript after silence
+// - interim_results: Shows partial transcripts for UI feedback
 
 import 'dotenv/config';
 import { createServer } from 'http';
@@ -32,9 +38,17 @@ const port = parseInt(process.env.PORT || '3000', 10);
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
-const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+// API Keys
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY; // Legacy fallback
 
-console.log('AssemblyAI API Key loaded:', ASSEMBLYAI_API_KEY ? 'Yes' : 'No');
+// Determine which STT provider to use
+const STT_PROVIDER = DEEPGRAM_API_KEY ? 'deepgram' : (ASSEMBLYAI_API_KEY ? 'assemblyai' : null);
+
+console.log('=== STT Configuration ===');
+console.log('Deepgram API Key:', DEEPGRAM_API_KEY ? 'Yes' : 'No');
+console.log('AssemblyAI API Key:', ASSEMBLYAI_API_KEY ? 'Yes' : 'No');
+console.log('Using Provider:', STT_PROVIDER || 'NONE - Please add DEEPGRAM_API_KEY to .env.local');
 
 app.prepare().then(() => {
     const server = createServer(async (req, res) => {
@@ -58,130 +72,301 @@ app.prepare().then(() => {
             wss.handleUpgrade(request, socket, head, (ws) => {
                 wss.emit('connection', ws, request);
             });
-        } else {
-            // Do not destroy requests to _next/webpack-hmr or valid Next.js paths
-            // Next.js handles these internally via the same server instance if we don't block them
-            // socket.destroy(); 
         }
+        // Don't destroy other WebSocket connections (needed for Next.js HMR)
     });
 
     wss.on('connection', (clientWs, request) => {
-        console.log('Client connected to transcription proxy');
+        console.log('\\n=== Client connected to transcription proxy ===');
 
-        if (!ASSEMBLYAI_API_KEY) {
-            console.error('AssemblyAI API key not configured');
-            clientWs.send(JSON.stringify({ type: 'error', message: 'AssemblyAI API key not configured' }));
+        if (!STT_PROVIDER) {
+            console.error('No STT API key configured');
+            clientWs.send(JSON.stringify({
+                type: 'error',
+                message: 'No STT API key configured. Add DEEPGRAM_API_KEY to .env.local'
+            }));
             clientWs.close();
             return;
         }
 
-        // Connect to AssemblyAI with Authorization header
-        // PRODUCTION SETTINGS based on Vapi/LiveKit/Pipecat best practices
-        const activeUrl = new URL('wss://streaming.assemblyai.com/v3/ws')
-        activeUrl.searchParams.set('sample_rate', 16000)
-        
-        // CRITICAL: format_turns=false saves ~200ms latency
-        // We don't need punctuation for LLM input
-        activeUrl.searchParams.set('format_turns', 'false')
-        
-        // AGGRESSIVE turn detection for minimal latency (from production voice AI research)
-        // These settings prioritize speed over accuracy
-        activeUrl.searchParams.set('end_of_turn_confidence_threshold', '0.3') // Default 0.4, lower = faster
-        activeUrl.searchParams.set('min_end_of_turn_silence_when_confident', '160') // Default 400ms, Vapi uses 160ms
-        activeUrl.searchParams.set('max_turn_silence', '400') // Default 1280ms, aggressive fallback
+        // Parse client request params
+        const clientUrl = new URL(request.url, `http://${request.headers.host}`);
+        const dualChannel = clientUrl.searchParams.get('dual_channel') === 'true';
 
-        // Check if client requested dual channel (multichannel)
-        const clientUrl = new URL(request.url, `http://${request.headers.host}`)
-        if (clientUrl.searchParams.get('dual_channel') === 'true') {
-            activeUrl.searchParams.set('multichannel', 'true')
-            console.log('Enabling multichannel (stereo) mode for AssemblyAI')
+        if (STT_PROVIDER === 'deepgram') {
+            handleDeepgramConnection(clientWs, dualChannel);
+        } else {
+            handleAssemblyAIConnection(clientWs, request, dualChannel);
         }
-        
-        console.log('AssemblyAI WebSocket URL:', activeUrl.toString())
+    });
 
-        const assemblyWs = new WebSocket(
-            activeUrl.toString(),
-            {
-                headers: {
-                    'Authorization': ASSEMBLYAI_API_KEY
-                }
-            }
-        );
+    // ========================================================================
+    // DEEPGRAM HANDLER - Primary STT Provider
+    // ========================================================================
+    function handleDeepgramConnection(clientWs, dualChannel) {
+        console.log('[Deepgram] Initializing connection...');
+        console.log('[Deepgram] Dual channel:', dualChannel);
 
-        assemblyWs.on('open', () => {
-            console.log('Connected to AssemblyAI');
-            clientWs.send(JSON.stringify({ type: 'connected' }));
+        // Build Deepgram WebSocket URL with all necessary params
+        const params = new URLSearchParams({
+            // Audio format
+            encoding: 'linear16',
+            sample_rate: '16000',
+            channels: dualChannel ? '2' : '1',
+
+            // Model
+            model: 'nova-2',
+            language: 'en-US',
+
+            // Smart formatting
+            smart_format: 'true',
+            punctuate: 'true',
+
+            // CRITICAL: Enable interim results for partial transcripts
+            interim_results: 'true',
+
+            // CRITICAL: Utterance end detection (1 second of silence after last word)
+            utterance_end_ms: '1000',
+
+            // CRITICAL: Endpointing - finalize transcript after 300ms silence
+            endpointing: '300',
+
+            // VAD events for speech start/end
+            vad_events: 'true',
+
+            // Diarization for speaker identification (if dual channel)
+            ...(dualChannel && { diarize: 'true' })
         });
 
-        assemblyWs.on('message', (data) => {
-            // Forward transcription results to client IMMEDIATELY (no processing delay)
-            if (clientWs.readyState === WebSocket.OPEN) {
-                const message = data.toString();
-                
-                // Quick parse for logging only
-                try {
-                    const parsed = JSON.parse(message);
-                    if (parsed.type === 'Turn') {
-                        console.log(`[AssemblyAI Turn] end_of_turn=${parsed.end_of_turn}, confidence=${(parsed.end_of_turn_confidence || 0).toFixed(3)}, text="${(parsed.transcript || '').substring(0, 30)}..."`);
-                    } else {
-                        console.log(`[AssemblyAI] ${parsed.type}`);
+        const deepgramUrl = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+        console.log('[Deepgram] Connecting to:', deepgramUrl.substring(0, 80) + '...');
+
+        const deepgramWs = new WebSocket(deepgramUrl, {
+            headers: {
+                'Authorization': `Token ${DEEPGRAM_API_KEY}`
+            }
+        });
+
+        // Track accumulated transcript for utterance grouping
+        let currentUtterance = '';
+        let lastSpeaker = null;
+
+        deepgramWs.on('open', () => {
+            console.log('[Deepgram] Connected successfully');
+            clientWs.send(JSON.stringify({ type: 'connected', provider: 'deepgram' }));
+        });
+
+        deepgramWs.on('message', (data) => {
+            if (clientWs.readyState !== WebSocket.OPEN) return;
+
+            try {
+                const msg = JSON.parse(data.toString());
+
+                // Handle different Deepgram message types
+                if (msg.type === 'Results') {
+                    const transcript = msg.channel?.alternatives?.[0]?.transcript || '';
+                    const isFinal = msg.is_final === true;
+                    const speechFinal = msg.speech_final === true;
+                    const words = msg.channel?.alternatives?.[0]?.words || [];
+
+                    // Determine speaker from diarization or channel
+                    let speaker = 'candidate'; // default
+                    if (dualChannel && msg.channel_index) {
+                        // In dual channel mode: channel 0 = interviewer (system), channel 1 = candidate (mic)
+                        speaker = msg.channel_index[0] === 0 ? 'interviewer' : 'candidate';
+                    } else if (words.length > 0 && words[0].speaker !== undefined) {
+                        speaker = words[0].speaker === 0 ? 'candidate' : 'interviewer';
                     }
-                } catch (e) {
-                    // Not JSON, just forward
+
+                    if (transcript) {
+                        console.log(`[Deepgram] ${isFinal ? 'FINAL' : 'interim'} | speech_final=${speechFinal} | speaker=${speaker} | "${transcript.substring(0, 50)}..."`);
+                    }
+
+                    // Send normalized message to client
+                    clientWs.send(JSON.stringify({
+                        type: 'transcript',
+                        transcript: transcript,
+                        is_final: isFinal,
+                        speech_final: speechFinal,
+                        speaker: speaker,
+                        channel: msg.channel_index?.[0] || 0,
+                        words: words,
+                        // Include raw for debugging
+                        raw_type: 'Results'
+                    }));
+
+                    // Accumulate final transcripts
+                    if (isFinal && transcript) {
+                        currentUtterance += (currentUtterance ? ' ' : '') + transcript;
+                        lastSpeaker = speaker;
+                    }
+
+                    // If speech_final, this is a good point to process the full utterance
+                    if (speechFinal && currentUtterance) {
+                        console.log(`[Deepgram] Speech ended - Full utterance: "${currentUtterance.substring(0, 80)}..."`);
+                    }
+
+                } else if (msg.type === 'UtteranceEnd') {
+                    // CRITICAL: This is when Deepgram detected end of speech
+                    console.log('[Deepgram] *** UtteranceEnd received ***');
+                    console.log(`[Deepgram] Final utterance to process: "${currentUtterance}"`);
+
+                    clientWs.send(JSON.stringify({
+                        type: 'utterance_end',
+                        transcript: currentUtterance,
+                        speaker: lastSpeaker || 'candidate',
+                        last_word_end: msg.last_word_end
+                    }));
+
+                    // Reset for next utterance
+                    currentUtterance = '';
+                    lastSpeaker = null;
+
+                } else if (msg.type === 'SpeechStarted') {
+                    console.log('[Deepgram] Speech started');
+                    clientWs.send(JSON.stringify({ type: 'speech_started' }));
+
+                } else if (msg.type === 'Metadata') {
+                    console.log('[Deepgram] Metadata received:', msg.request_id);
+
+                } else if (msg.type === 'Error') {
+                    console.error('[Deepgram] Error:', msg.message);
+                    clientWs.send(JSON.stringify({ type: 'error', message: msg.message }));
                 }
-                
-                // CRITICAL: Forward immediately without any delay
-                clientWs.send(message);
+
+            } catch (e) {
+                console.error('[Deepgram] Error parsing message:', e);
             }
         });
 
-        assemblyWs.on('error', (error) => {
-            console.error('AssemblyAI error:', error.message);
-            if (clientWs.readyState === WebSocket.OPEN) {
-                clientWs.send(JSON.stringify({ type: 'error', message: error.message }));
-            }
+        deepgramWs.on('error', (error) => {
+            console.error('[Deepgram] WebSocket error:', error.message);
+            clientWs.send(JSON.stringify({ type: 'error', message: error.message }));
         });
 
-        assemblyWs.on('close', (code, reason) => {
-            console.log('AssemblyAI closed:', code, reason?.toString());
+        deepgramWs.on('close', (code, reason) => {
+            console.log('[Deepgram] Connection closed:', code, reason?.toString());
             if (clientWs.readyState === WebSocket.OPEN) {
                 clientWs.close();
             }
         });
 
-        // Forward audio from client to AssemblyAI
+        // Forward audio from client to Deepgram
         clientWs.on('message', (data, isBinary) => {
-            if (assemblyWs.readyState === WebSocket.OPEN) {
+            if (deepgramWs.readyState === WebSocket.OPEN) {
                 if (isBinary || Buffer.isBuffer(data)) {
-                    // Forward binary audio data
-                    assemblyWs.send(data);
-                } else {
-                    // JSON message from client
-                    try {
-                        const msg = JSON.parse(data.toString());
-                        console.log('Client JSON message:', msg.type);
-                    } catch {
-                        // Not JSON, might be audio data as string
-                        assemblyWs.send(data);
-                    }
+                    deepgramWs.send(data);
                 }
             }
         });
 
         clientWs.on('close', () => {
-            console.log('Client disconnected');
-            if (assemblyWs.readyState === WebSocket.OPEN) {
-                assemblyWs.close();
+            console.log('[Deepgram] Client disconnected');
+            if (deepgramWs.readyState === WebSocket.OPEN) {
+                // Send close frame to Deepgram
+                deepgramWs.close();
             }
         });
 
         clientWs.on('error', (error) => {
-            console.error('Client WebSocket error:', error.message);
+            console.error('[Deepgram] Client WebSocket error:', error.message);
         });
-    });
+    }
+
+    // ========================================================================
+    // ASSEMBLYAI HANDLER - Legacy Fallback
+    // ========================================================================
+    function handleAssemblyAIConnection(clientWs, request, dualChannel) {
+        console.log('[AssemblyAI] Using legacy fallback...');
+
+        const activeUrl = new URL('wss://streaming.assemblyai.com/v3/ws');
+        activeUrl.searchParams.set('sample_rate', '16000');
+        activeUrl.searchParams.set('format_turns', 'false');
+        activeUrl.searchParams.set('end_of_turn_confidence_threshold', '0.3');
+        activeUrl.searchParams.set('min_end_of_turn_silence_when_confident', '160');
+        activeUrl.searchParams.set('max_turn_silence', '400');
+
+        if (dualChannel) {
+            activeUrl.searchParams.set('multichannel', 'true');
+        }
+
+        const assemblyWs = new WebSocket(activeUrl.toString(), {
+            headers: { 'Authorization': ASSEMBLYAI_API_KEY }
+        });
+
+        assemblyWs.on('open', () => {
+            console.log('[AssemblyAI] Connected');
+            clientWs.send(JSON.stringify({ type: 'connected', provider: 'assemblyai' }));
+        });
+
+        assemblyWs.on('message', (data) => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+                const message = data.toString();
+                try {
+                    const parsed = JSON.parse(message);
+
+                    // Normalize AssemblyAI format to match our new format
+                    if (parsed.type === 'Turn') {
+                        clientWs.send(JSON.stringify({
+                            type: 'transcript',
+                            transcript: parsed.transcript || '',
+                            is_final: parsed.end_of_turn === true,
+                            speech_final: parsed.end_of_turn === true,
+                            speaker: dualChannel ? (parsed.channel === 1 ? 'candidate' : 'interviewer') : 'candidate',
+                            channel: parsed.channel || 0,
+                            raw_type: 'Turn'
+                        }));
+
+                        // Also send utterance_end when turn ends
+                        if (parsed.end_of_turn === true && parsed.transcript) {
+                            clientWs.send(JSON.stringify({
+                                type: 'utterance_end',
+                                transcript: parsed.transcript,
+                                speaker: dualChannel ? (parsed.channel === 1 ? 'candidate' : 'interviewer') : 'candidate'
+                            }));
+                        }
+                    } else if (parsed.type === 'Begin') {
+                        clientWs.send(JSON.stringify({ type: 'session_started' }));
+                    } else {
+                        clientWs.send(message);
+                    }
+                } catch (e) {
+                    clientWs.send(message);
+                }
+            }
+        });
+
+        assemblyWs.on('error', (error) => {
+            console.error('[AssemblyAI] Error:', error.message);
+            clientWs.send(JSON.stringify({ type: 'error', message: error.message }));
+        });
+
+        assemblyWs.on('close', (code, reason) => {
+            console.log('[AssemblyAI] Closed:', code);
+            if (clientWs.readyState === WebSocket.OPEN) {
+                clientWs.close();
+            }
+        });
+
+        clientWs.on('message', (data, isBinary) => {
+            if (assemblyWs.readyState === WebSocket.OPEN) {
+                if (isBinary || Buffer.isBuffer(data)) {
+                    assemblyWs.send(data);
+                }
+            }
+        });
+
+        clientWs.on('close', () => {
+            console.log('[AssemblyAI] Client disconnected');
+            if (assemblyWs.readyState === WebSocket.OPEN) {
+                assemblyWs.close();
+            }
+        });
+    }
 
     server.listen(port, () => {
-        console.log(`> Ready on http://${hostname}:${port}`);
+        console.log(`\\n> Ready on http://${hostname}:${port}`);
         console.log(`> WebSocket proxy available at ws://${hostname}:${port}/api/transcribe-ws`);
+        console.log(`> STT Provider: ${STT_PROVIDER?.toUpperCase() || 'NONE'}`);
     });
 });

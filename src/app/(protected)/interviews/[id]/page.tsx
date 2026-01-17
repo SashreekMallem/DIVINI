@@ -25,9 +25,9 @@ import {
 import type { Interview, Resume, JobDescription, Company } from '@/types/database'
 import { screenShareManager } from '@/lib/utils/screenShareManager'
 import { loadPreviousRounds, type MultiRoundContext } from '@/lib/utils/multiRoundContext'
-import { 
-    buildSmartContext, 
-    generateSessionMemory, 
+import {
+    buildSmartContext,
+    generateSessionMemory,
     saveInterviewSummary,
     loadMultiRoundMemory,
     type SessionMemory,
@@ -73,7 +73,7 @@ export default function InterviewSessionPage() {
     const [coaching, setCoaching] = useState<CoachingEntry[]>([])
     const [isGenerating, setIsGenerating] = useState(false)
     const [multiRoundContext, setMultiRoundContext] = useState<MultiRoundContext | null>(null)
-    
+
     // Smart Context Management
     const [sessionMemory, setSessionMemory] = useState<SessionMemory | null>(null)
     const [multiRoundMemory, setMultiRoundMemory] = useState<MultiRoundMemory | null>(null)
@@ -89,6 +89,8 @@ export default function InterviewSessionPage() {
     const audioContextRef = useRef<AudioContext | null>(null)
     const streamRef = useRef<MediaStream | null>(null)
     const userId = useRef<string | null>(null)
+    // For cancel/restart pattern: abort in-flight LLM requests when new speech comes in
+    const abortControllerRef = useRef<AbortController | null>(null)
 
     useEffect(() => {
         loadInterview()
@@ -208,7 +210,7 @@ export default function InterviewSessionPage() {
                 const flatText = tData.map(t => `${t.speaker}: ${t.text}`).join('\n')
                 setTranscript(flatText)
             }
-            
+
             // LOAD MULTI-ROUND CONTEXT: Previous rounds for same application/company
             if (user && interviewData) {
                 // Legacy context (still useful for raw data access)
@@ -219,7 +221,7 @@ export default function InterviewSessionPage() {
                     user.id
                 )
                 setMultiRoundContext(context)
-                
+
                 // Smart multi-round memory (uses summaries, not raw Q&A)
                 const smartMemory = await loadMultiRoundMemory(
                     interviewData.application_id || null,
@@ -228,7 +230,7 @@ export default function InterviewSessionPage() {
                     params.id as string
                 )
                 setMultiRoundMemory(smartMemory)
-                
+
                 if (smartMemory && smartMemory.rounds.length > 0) {
                     console.log(`📚 Smart multi-round memory loaded: ${smartMemory.rounds.length} previous round(s)`)
                     console.log(`📚 Consistent strengths: ${smartMemory.consistentStrengths.join(', ')}`)
@@ -244,7 +246,28 @@ export default function InterviewSessionPage() {
         setLoading(false)
     }
 
-    // Removed detectQuestion - we now always trigger Gemini on final transcripts
+    // Detect if text is likely a question (for intelligent Gemini triggering)
+    const detectQuestion = useCallback((text: string): boolean => {
+        if (!text || text.length < 10) return false
+
+        const lowerText = text.toLowerCase().trim()
+
+        // Patterns that indicate a question
+        const questionPatterns = [
+            // Direct question marks
+            /\?$/,
+            // Question starters
+            /^(tell me|describe|explain|what|how|why|when|where|who|can you|could you|would you|have you|do you|did you|are you|were you|is there|was there)/i,
+            // Interview-specific patterns
+            /^(walk me through|give me an example|share|what's your|what is your|talk about|discuss)/i,
+            // Behavioral questions
+            /^(tell me about a time|describe a situation|give an example of when)/i,
+            // Technical questions
+            /^(how would you|what approach|what's the difference|explain the)/i,
+        ]
+
+        return questionPatterns.some(pattern => pattern.test(lowerText))
+    }, [])
 
     const saveQuestion = async (questionText: string): Promise<string | null> => {
         if (!userId.current) return null
@@ -327,7 +350,7 @@ export default function InterviewSessionPage() {
                 question: c.question,
                 answer: c.answer
             }))
-            
+
             // Update session memory every 10 Q&A for compression
             let updatedSessionMemory = sessionMemory
             if (currentSessionQAs.length >= 10 && currentSessionQAs.length % 5 === 0) {
@@ -335,7 +358,7 @@ export default function InterviewSessionPage() {
                 updatedSessionMemory = await generateSessionMemory(currentSessionQAs, sessionMemory)
                 setSessionMemory(updatedSessionMemory)
             }
-            
+
             // Build smart context with clear role definitions
             const { contextParts } = buildSmartContext({
                 resumeContent: resume?.content || '',
@@ -349,7 +372,7 @@ export default function InterviewSessionPage() {
                 sessionMemory: updatedSessionMemory,
                 multiRoundMemory: multiRoundMemory,
             })
-            
+
             // Log smart context
             console.log('🧠 Smart Context:', {
                 currentRound: interview?.round_number || 1,
@@ -358,7 +381,7 @@ export default function InterviewSessionPage() {
                 hasSessionMemory: !!updatedSessionMemory,
                 hasMultiRoundMemory: !!multiRoundMemory,
             })
-            
+
             // Build context for API (using smart context)
             const contextData = {
                 question,
@@ -372,7 +395,6 @@ export default function InterviewSessionPage() {
                 transcript: transcriptSegments.slice(-20).map(s => `${s.speaker}: ${s.text}`).join('\n'), // Last 20 lines
             }
 
-            // Log context being sent
             console.log('📋 Context sent to Gemini:', {
                 round: interview?.round_number || 1,
                 hasResume: !!contextData.resumeContent,
@@ -382,10 +404,18 @@ export default function InterviewSessionPage() {
                 smartContextLength: contextData.smartContext.length,
             })
 
+            // CANCEL/RESTART PATTERN: Abort any in-flight request before starting new one
+            if (abortControllerRef.current) {
+                console.log('⏹️ Cancelling previous LLM request...')
+                abortControllerRef.current.abort()
+            }
+            abortControllerRef.current = new AbortController()
+
             const response = await fetch('/api/generate-answer', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(contextData),
+                signal: abortControllerRef.current.signal,
             })
 
             if (!response.ok) {
@@ -430,7 +460,12 @@ export default function InterviewSessionPage() {
             setTimeout(() => {
                 coachingRef.current?.scrollTo({ top: coachingRef.current.scrollHeight, behavior: 'smooth' })
             }, 100)
-        } catch (err) {
+        } catch (err: any) {
+            // Don't log abort errors - they're intentional from cancel/restart pattern
+            if (err?.name === 'AbortError') {
+                console.log('⏹️ LLM request aborted (new request started)')
+                return // Exit silently, new request is in progress
+            }
             console.error('Error generating answer:', err)
         } finally {
             setIsGenerating(false)
@@ -467,7 +502,7 @@ export default function InterviewSessionPage() {
                         '3. Make sure "Share tab audio" is checked\n\n' +
                         'Click OK to continue...'
                     )
-                    
+
                     if (!userConfirmed) {
                         setUseSystemAudio(false)
                         setError('System audio capture cancelled. Continuing with microphone only.')
@@ -536,17 +571,16 @@ export default function InterviewSessionPage() {
 
             socket.onmessage = (event) => {
                 try {
-                    const receiveTime = Date.now()
                     const data = JSON.parse(event.data)
-                    
-                    // Log message receive time for debugging
-                    if (data.type === 'Turn') {
-                        const messageDelay = receiveTime - (data.timestamp || receiveTime)
-                        // We'll log this in the Turn handler below
-                    }
+
+                    // =====================================================
+                    // DEEPGRAM NORMALIZED MESSAGE HANDLER
+                    // Based on Retell/Vapi architecture research
+                    // =====================================================
 
                     if (data.type === 'connected') {
                         console.log('✅ WebSocket connected to transcription proxy')
+                        console.log('   Provider:', data.provider || 'unknown')
                         setIsRecording(true)
                         timerRef.current = setInterval(() => setElapsedTime(prev => prev + 1), 1000)
 
@@ -559,68 +593,95 @@ export default function InterviewSessionPage() {
                             console.log('🎙️ Starting audio processing...')
                             startAudioProcessing(streamRef.current, socket)
                         }
-                    } else if (data.type === 'Begin') {
-                        console.log('🚀 Transcription session started - Session ID:', data.id)
-                    } else if (data.type === 'Turn') {
-                        // PRODUCTION VOICE AI STRATEGY (from Vapi, LiveKit, Pipecat research)
-                        // Key insight: Trigger on FIRST available signal, don't wait
-                        
-                        const isComplete = data.end_of_turn === true
-                        const turnOrder = data.turn_order ?? 0
+                    }
+
+                    // PARTIAL & FINAL TRANSCRIPTS (interim_results from Deepgram)
+                    else if (data.type === 'transcript') {
                         const transcript = data.transcript?.trim() || ''
-                        const utterance = data.utterance?.trim() || transcript // fallback to transcript
-                        const confidence = data.end_of_turn_confidence || 0
-                        
-                        // Log every Turn for debugging latency
-                        console.log(`📨 [Turn ${turnOrder}] end_of_turn=${isComplete}, confidence=${confidence.toFixed(3)}, text="${transcript.substring(0, 40)}..."`)
-                        
-                        // Determine speaker
-                        // Channel mapping: Channel 0 = Microphone (You/Candidate), Channel 1 = System Audio (Interviewer)
-                        const speaker = useSystemAudio
-                            ? ((data.channel === 0 || data.channel === '0') ? 'You' : 'Interviewer')
-                            : 'You' // Default to You if mono (only microphone)
-                        const dbSpeaker = speaker === 'You' ? 'candidate' : 'interviewer'
-                        const isInterviewer = speaker === 'Interviewer'
+                        const isFinal = data.is_final === true
+                        const speechFinal = data.speech_final === true
+                        const speaker = data.speaker === 'interviewer' ? 'Interviewer' : 'You'
 
-                        const turnId = `turn-${turnOrder}`
-                        const alreadyTriggered = transcriptSegments.some(s => s.id === turnId)
-                        
-                        // PRODUCTION STRATEGY: Pre-emptive generation
-                        // Trigger as SOON as end_of_turn is true - don't wait for anything else
-                        // The utterance/transcript is ready when end_of_turn fires
-                        
-                        if (isComplete && !alreadyTriggered && isInterviewer && transcript.length > 3) {
-                            const textToUse = utterance || transcript
-                            console.log(`⚡ [Turn ${turnOrder}] END OF TURN - Triggering Gemini NOW with: "${textToUse.substring(0, 50)}..."`)
-                            
-                            // Save immediately
-                            setTranscriptSegments(prev => [...prev, {
-                                id: turnId,
-                                speaker: speaker as 'You' | 'Interviewer',
-                                text: textToUse,
-                                timestamp: Date.now()
-                            }])
-
-                            setTranscript(prev => prev + (prev ? '\n' : '') + `${speaker}: ${textToUse}`)
-                            setPartialTranscript('')
-
-                            // Save to DB (async, don't wait)
-                            saveTranscriptSegment(textToUse, dbSpeaker)
-
-                            // TRIGGER GEMINI IMMEDIATELY
-                            generateAnswer(textToUse)
+                        if (transcript) {
+                            console.log(`📨 [${isFinal ? 'FINAL' : 'interim'}] speech_final=${speechFinal} | ${speaker}: "${transcript.substring(0, 50)}..."`)
                         }
-                        // Show partial transcript while speaking (grey text)
-                        else if (transcript && !isComplete) {
+
+                        // Show partial transcripts as "Listening..." text
+                        if (!isFinal && transcript) {
                             setPartialTranscript(transcript)
                         }
 
+                        // On final transcript, save to segments
+                        if (isFinal && transcript) {
+                            // Check if we already have this exact segment to avoid duplicates
+                            const segmentId = `${Date.now()}-${speaker}`
+
+                            setTranscriptSegments(prev => {
+                                // Avoid duplicate if last segment has same text
+                                const last = prev[prev.length - 1]
+                                if (last && last.text === transcript && last.speaker === speaker) {
+                                    return prev
+                                }
+                                return [...prev, {
+                                    id: segmentId,
+                                    speaker: speaker as 'You' | 'Interviewer',
+                                    text: transcript,
+                                    timestamp: Date.now()
+                                }]
+                            })
+
+                            setTranscript(prev => prev + (prev ? '\n' : '') + `${speaker}: ${transcript}`)
+                            setPartialTranscript('')
+
+                            // Save to DB (async)
+                            const dbSpeaker = speaker === 'You' ? 'candidate' : 'interviewer'
+                            saveTranscriptSegment(transcript, dbSpeaker)
+                        }
+
+                        // Auto-scroll
                         setTimeout(() => {
                             transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: 'smooth' })
                         }, 100)
-                    } else if (data.type === 'error') {
+                    }
+
+                    // UTTERANCE END - The speaker finished their thought
+                    // This is the CRITICAL event for triggering Gemini
+                    else if (data.type === 'utterance_end') {
+                        const transcript = data.transcript?.trim() || ''
+                        const speaker = data.speaker === 'interviewer' ? 'Interviewer' : 'You'
+
+                        console.log(`🎯 UTTERANCE END | ${speaker}: "${transcript.substring(0, 60)}..."`)
+
+                        // Clear partial transcript since speech ended
+                        setPartialTranscript('')
+
+                        // TRIGGER GEMINI if interviewer asked a question
+                        // Only trigger on interviewer speech OR all speech if using mono (no dual channel)
+                        const shouldTrigger = speaker === 'Interviewer' || !useSystemAudio
+
+                        if (shouldTrigger && transcript && detectQuestion(transcript)) {
+                            console.log(`⚡ Detected question - Triggering Gemini NOW!`)
+                            generateAnswer(transcript)
+                        }
+                    }
+
+                    // SPEECH STARTED - User began speaking
+                    else if (data.type === 'speech_started') {
+                        console.log('🔊 Speech started detected')
+                        // Could be used to show "speaking" indicator
+                    }
+
+                    // SESSION STARTED (AssemblyAI legacy)
+                    else if (data.type === 'session_started' || data.type === 'Begin') {
+                        console.log('🚀 Transcription session started')
+                    }
+
+                    // ERROR
+                    else if (data.type === 'error') {
+                        console.error('❌ Transcription error:', data.message)
                         setError(data.message || 'Transcription error')
                     }
+
                 } catch (e) {
                     console.error('Error parsing WS message:', e)
                 }
@@ -752,12 +813,12 @@ export default function InterviewSessionPage() {
             question: c.question,
             answer: c.answer
         }))
-        
+
         if (currentSessionQAs.length > 0 && userId.current) {
             console.log('🧠 Generating final interview summary...')
             const finalMemory = await generateSessionMemory(currentSessionQAs, sessionMemory)
             setSessionMemory(finalMemory)
-            
+
             // Save summary to database for future multi-round context
             await saveInterviewSummary(
                 params.id as string,
@@ -792,7 +853,7 @@ export default function InterviewSessionPage() {
         }).eq('id', params.id)
 
         setInterview(prev => prev ? { ...prev, session_status: 'in_progress' } : null)
-        
+
         // Reload history when resuming to ensure we have latest Q&A and transcripts
         await loadInterview()
         setLoading(false)
@@ -819,8 +880,8 @@ export default function InterviewSessionPage() {
         )
     }
 
-            const hasContext = resume?.content || jobDescription?.content || company?.name
-            const hasMultiRoundContext = multiRoundContext && multiRoundContext.previousRounds.length > 0
+    const hasContext = resume?.content || jobDescription?.content || company?.name
+    const hasMultiRoundContext = multiRoundContext && multiRoundContext.previousRounds.length > 0
 
     // STEALTH MODE: Render absolutely nothing (blank screen) if active.
     // Logic hooks (audio, etc.) above still run.
@@ -947,22 +1008,22 @@ export default function InterviewSessionPage() {
                 </div>
             )}
 
-                    {!hasContext && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#eab308', fontSize: '13px' }}>
-                            <AlertCircle style={{ width: '16px', height: '16px' }} />
-                            No resume, JD, or company linked. AI coaching will be generic. Add context in interview setup.
-                        </div>
-                    )}
+            {!hasContext && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#eab308', fontSize: '13px' }}>
+                    <AlertCircle style={{ width: '16px', height: '16px' }} />
+                    No resume, JD, or company linked. AI coaching will be generic. Add context in interview setup.
+                </div>
+            )}
 
-                    {hasMultiRoundContext && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#818cf8', fontSize: '13px' }}>
-                            <Sparkles style={{ width: '16px', height: '16px' }} />
-                            <span>
-                                <strong>Multi-Round Context Active:</strong> {multiRoundContext.previousRounds.length} previous round(s) loaded. 
-                                AI will reference previous Q&A and avoid repeating questions.
-                            </span>
-                        </div>
-                    )}
+            {hasMultiRoundContext && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#818cf8', fontSize: '13px' }}>
+                    <Sparkles style={{ width: '16px', height: '16px' }} />
+                    <span>
+                        <strong>Multi-Round Context Active:</strong> {multiRoundContext.previousRounds.length} previous round(s) loaded.
+                        AI will reference previous Q&A and avoid repeating questions.
+                    </span>
+                </div>
+            )}
 
             {/* Context Panel */}
             {showContext && (
