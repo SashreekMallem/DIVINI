@@ -34,7 +34,6 @@ import {
     type MultiRoundMemory
 } from '@/lib/utils/smartContextManager'
 import { useDeepgram } from '@/lib/hooks/useDeepgram'
-import { StealthModeGuide } from '@/components/StealthModeGuide'
 import { Check } from 'lucide-react'
 
 interface CoachingEntry {
@@ -131,11 +130,8 @@ export default function InterviewSessionPage() {
         screenShareManager.init(
             (isStealth) => {
                 setIsStealthMode(isStealth)
-                // If it's macOS/Linux and stealth is triggered, show the guide once
-                if (isStealth && (window as any).electron?.platform !== 'win32') {
-                    // Note: In auto-hide mode, the guide should be shown before capture
-                    // But for first-time use, we show it on toggle if needed
-                }
+                // Windows: True stealth
+                // macOS: Auto-hide/Show
             },
             () => {
                 // onSaveState: return the data to be persisted
@@ -1057,12 +1053,6 @@ export default function InterviewSessionPage() {
                 </div>
             </div>
 
-            {/* Stealth Mode Guide Modal */}
-            <StealthModeGuide
-                isOpen={showStealthGuide}
-                onClose={() => setShowStealthGuide(false)}
-                platform={platform}
-            />
         </div>
     )
 }
