@@ -8,12 +8,15 @@ async function getAudioSources() {
     try {
         // Check macOS screen recording permission
         if (process.platform === 'darwin') {
-            const status = systemPreferences.getMediaAccessStatus('screen')
-            if (status !== 'granted') {
-                const granted = await systemPreferences.askForMediaAccess('screen')
-                if (!granted) {
-                    throw new Error('Screen recording permission denied')
+            try {
+                const status = systemPreferences.getMediaAccessStatus('screen')
+                if (status !== 'granted') {
+                    // Note: askForMediaAccess('screen') is deprecated/removed in some Electron versions
+                    // We'll let desktopCapturer handle it natively
+                    console.log('⚠️ Screen permission not granted, sources might be limited')
                 }
+            } catch (e) {
+                console.warn('⚠️ Failed to check screen permission:', e)
             }
         }
 

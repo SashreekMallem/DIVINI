@@ -63,9 +63,6 @@ class StealthManager {
      */
     _enableWindowsStealth() {
         try {
-            // Core: Makes window invisible to screen capture on Windows 10 2004+
-            this.win.setContentProtection(true)
-
             // Always on top so coach stays visible during interview
             this.win.setAlwaysOnTop(true, 'screen-saver')
 
@@ -93,9 +90,6 @@ class StealthManager {
      */
     _enableMacOSStealth() {
         try {
-            // Enable legacy protection (works with some older apps)
-            this.win.setContentProtection(true)
-
             // Always on top
             this.win.setAlwaysOnTop(true, 'floating')
 
@@ -265,7 +259,6 @@ class StealthManager {
      */
     disableStealth() {
         try {
-            this.win.setContentProtection(false)
             this.win.setAlwaysOnTop(false)
             this.win.setSkipTaskbar(false)
 

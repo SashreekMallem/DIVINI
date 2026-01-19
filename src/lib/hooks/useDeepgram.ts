@@ -14,6 +14,7 @@ type DeepgramConfig = {
  * - System audio (from tab/screen share) → labeled as "Interviewer"
  * - GainNode for volume/mute control
  * - Proper error handling for getDisplayMedia
+ * - Support for pre-selected audio streams (Web Pre-selection)
  */
 export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramConfig) {
     const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected')
@@ -153,19 +154,15 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
         return { audioContext, processor }
     }, [])
 
-    const connect = useCallback(async (useSystemAudio: boolean = false, selectedMicId?: string) => {
+    const connect = useCallback(async (useSystemAudio: boolean = false, selectedMicId?: string, existingSystemStream?: MediaStream | null) => {
         try {
             setStatus('connecting')
             console.log('🚀 Starting audio capture...')
 
-            // ===== CRITICAL: Capture ALL media streams FIRST =====
-            // Must call getUserMedia and getDisplayMedia while still in the user gesture context
-            // BEFORE any other async operations
-
             let micStream: MediaStream
             let displayStream: MediaStream | null = null
 
-            // 1. Get microphone (required)
+            // 1. Get microphone (always required)
             console.log('🎙️ Requesting microphone access...')
             micStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
@@ -177,44 +174,48 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
                 }
             })
 
-            // 2. Get screen share (optional - still in gesture context!)
+            // 2. Get system audio (optional)
             if (useSystemAudio) {
-                console.log('🔊 Requesting screen share for system audio...')
-                console.log('IMPORTANT INSTRUCTIONS:')
-                console.log('1. Select "Browser Tab" (not Window/Screen)')
-                console.log('2. Pick the tab where the interview is happening')
-                console.log('3. CHECK "Share tab audio" (Crucial!)')
+                if (existingSystemStream) {
+                    console.log('🔊 Using pre-selected web system audio stream')
+                    displayStream = existingSystemStream
+                } else {
+                    console.log('🔊 Requesting screen share for system audio...')
+                    console.log('IMPORTANT INSTRUCTIONS:')
+                    console.log('1. Select "Browser Tab" (not Window/Screen)')
+                    console.log('2. Pick the tab where the interview is happening')
+                    console.log('3. CHECK "Share tab audio" (Crucial!)')
 
-                try {
-                    displayStream = await navigator.mediaDevices.getDisplayMedia({
-                        video: { width: 1, height: 1, frameRate: 1 }, // Minimal video to satisfy API
-                        audio: {
-                            echoCancellation: false,
-                            noiseSuppression: false,
-                            autoGainControl: false,
-                            // @ts-ignore - Chrome hint
-                            systemAudio: 'include',
-                        },
-                        // @ts-ignore - Chrome constraints
-                        preferCurrentTab: false, // We want them to pick the OTHER tab (Zoom/Meet), not this one
-                        surfaceSwitching: 'include',
-                        selfBrowserSurface: 'exclude',
-                        monitorTypeSurfaces: 'exclude' // Don't show screens, only tabs/windows ideally
-                    })
-                } catch (e: any) {
-                    if (e.name === 'NotAllowedError') {
-                        console.warn('⚠️ Screen share cancelled by user')
-                        // Don't error out, just fall back to mic-only but warn
-                        onError('System audio cancelled. Using microphone only.')
-                    } else {
-                        console.error('❌ Screen share error:', e)
-                        onError(`System audio error: ${e.message}`)
+                    try {
+                        displayStream = await navigator.mediaDevices.getDisplayMedia({
+                            video: { width: 1, height: 1, frameRate: 1 },
+                            audio: {
+                                echoCancellation: false,
+                                noiseSuppression: false,
+                                autoGainControl: false,
+                                // @ts-ignore - Chrome hint
+                                systemAudio: 'include',
+                            },
+                            // @ts-ignore - Chrome constraints
+                            preferCurrentTab: false,
+                            surfaceSwitching: 'include',
+                            selfBrowserSurface: 'exclude',
+                            monitorTypeSurfaces: 'exclude'
+                        })
+                    } catch (e: any) {
+                        if (e.name === 'NotAllowedError') {
+                            console.warn('⚠️ Screen share cancelled by user')
+                            onError('System audio cancelled. Using microphone only.')
+                        } else {
+                            console.error('❌ Screen share error:', e)
+                            onError(`System audio error: ${e.message}`)
+                        }
+                        displayStream = null
                     }
-                    displayStream = null
                 }
             }
 
-            // ===== NOW create WebSocket connections (can be async) =====
+            // ===== Create WebSocket connections =====
 
             // Setup Microphone Channel
             console.log('🔌 Connecting mic to Deepgram...')
@@ -228,16 +229,12 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
             if (displayStream) {
                 const audioTracks = displayStream.getAudioTracks()
 
-                // Stop video track immediately (saves bandwidth/cpu)
+                // Stop video track immediately
                 displayStream.getVideoTracks().forEach(t => t.stop())
 
                 if (audioTracks.length === 0) {
-                    // CRITICAL ERROR: User picked a source but didn't share audio
                     console.error('❌ No system audio track found!')
-                    console.error('👉 Did you forget to check "Share tab audio"?')
                     onError('NO SYSTEM AUDIO DETECTED. Please restart and check "Share tab audio" in the popup.')
-
-                    // Stop the stream since it's useless
                     displayStream.getTracks().forEach(t => t.stop())
                 } else {
                     console.log('🔌 Connecting system audio to Deepgram (Interviewer channel)...')
@@ -251,7 +248,6 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
                         setupAudioPipeline(audioOnlyStream, sysSocket, sysContextRef)
                         console.log('✅ System audio connected & processing')
 
-                        // Handle user stopping share
                         audioTracks[0].onended = () => {
                             console.log('🛑 User stopped sharing system audio')
                             sysSocketRef.current?.close()
@@ -286,6 +282,12 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
         sysSocketRef.current?.close()
         sysStreamRef.current?.getTracks().forEach(t => t.stop())
         sysContextRef.current?.close()
+
+        // Stop stealth audio if running (Electron only)
+        // We just disable loopback mode to be safe, though stream is closed above
+        if (typeof window !== 'undefined' && (window as any).electron?.stealthAudio) {
+            (window as any).electron.stealthAudio.disable().catch(() => { })
+        }
 
         setStatus('disconnected')
         setIsProcessing(false)
@@ -387,6 +389,109 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
         }
     }, [createDeepgramSocket, setupAudioPipeline, onError])
 
+    /**
+     * STEALTH MODE: Invisible audio capture using native OS APIs
+     * 
+     * This method uses native audio loopback (Core Audio Taps on macOS, WASAPI on Windows)
+     * to capture system audio WITHOUT:
+     * - Screen recording permission popup
+     * - "Sharing to..." browser indicator
+     * - Any visible indicators to the meeting app
+     * 
+     * This is how Final Round AI and similar apps work.
+     */
+    const connectStealth = useCallback(async (selectedMicId?: string) => {
+        try {
+            setStatus('connecting')
+            console.log('🔊 Starting STEALTH audio capture (invisible!)...')
+
+            // Check if running in Electron
+            const electron = typeof window !== 'undefined' ? (window as any).electron : null
+            if (!electron?.stealthAudio) {
+                throw new Error('Stealth audio requires the Electron app')
+            }
+
+            // 1. Get microphone (standard way - always needed)
+            console.log('🎙️ Requesting microphone access...')
+            const micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
+                    sampleRate: 16000,
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                }
+            })
+
+            // 2. Start native system audio loopback (INVISIBLE!)
+            console.log('🔇 Starting invisible system audio capture...')
+
+            // Enable loopback mode in main process
+            await electron.stealthAudio.enable()
+
+            // Get the stream - library intercepts this call!
+            // MUST request video: true for it to work, but it's loopback not screen share
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                audio: true,
+                video: true // Required by library, but will be stealthy
+            })
+
+            // Disable loopback mode (restore normal behavior)
+            // await electron.stealthAudio.disable() 
+            // ^ Keep enabled for duration or disable immediately? 
+            // Library docs say "disable... restoration full functionality". 
+            // We'll keep it enabled or disable after getting stream? 
+            // Docs pattern: enable -> getStream -> disable.
+            await electron.stealthAudio.disable()
+
+            console.log('✅ Native audio loopback stream acquired')
+
+            const audioTracks = stream.getAudioTracks()
+            if (audioTracks.length === 0) {
+                throw new Error('No audio track in stealth stream')
+            }
+
+            // Stop video immediately (it's just a loopback visual or black screen)
+            stream.getVideoTracks().forEach(t => t.stop())
+
+            // ===== Setup WebSocket connections =====
+
+            // Mic channel (You)
+            console.log('🔌 Connecting mic to Deepgram...')
+            const micSocket = await createDeepgramSocket('You')
+            micSocketRef.current = micSocket
+            micStreamRef.current = micStream
+            setupAudioPipeline(micStream, micSocket, micContextRef, micGainRef)
+            console.log('✅ Mic ready')
+
+            // System audio channel (Interviewer)
+            console.log('🔌 Connecting stealth audio to Deepgram...')
+            const sysSocket = await createDeepgramSocket('Interviewer')
+            sysSocketRef.current = sysSocket
+
+            const sysStream = new MediaStream(audioTracks)
+            sysStreamRef.current = sysStream  // Store to close later
+
+            setupAudioPipeline(sysStream, sysSocket, sysContextRef)
+
+            console.log('✅ Stealth audio connected (INVISIBLE!)')
+
+            setStatus('connected')
+            setIsProcessing(true)
+            console.log('🎉 Stealth mode active! No indicators visible.')
+
+        } catch (e: any) {
+            console.error('❌ Stealth capture failed:', e)
+            setStatus('disconnected')
+            onError(e.message || 'Could not start stealth audio')
+
+            // Cleanup just in case
+            if (typeof window !== 'undefined' && (window as any).electron?.stealthAudio) {
+                (window as any).electron.stealthAudio.disable().catch(() => { })
+            }
+        }
+    }, [createDeepgramSocket, setupAudioPipeline, onError])
+
     // Legacy compatibility
     const startStreaming = useCallback(async () => {
         console.log('ℹ️ startStreaming is now handled by connect()')
@@ -395,6 +500,7 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
     return {
         connect,
         connectElectron,
+        connectStealth, // NEW: Invisible audio capture
         disconnect,
         startStreaming,
         toggleMicMute,

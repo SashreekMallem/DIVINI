@@ -30,8 +30,15 @@ contextBridge.exposeInMainWorld('electron', {
         }
     },
 
-    // Audio source selection (for dual-channel capture)
+    // Audio source selection (legacy - for dropdown UI)
     getAudioSources: () => ipcRenderer.invoke('audio:getSources'),
+
+    // === STEALTH AUDIO API (Invisible System Audio Capture) ===
+    // This uses the native handlers registered by electron-audio-loopback
+    stealthAudio: {
+        enable: () => ipcRenderer.invoke('enable-loopback-audio'),
+        disable: () => ipcRenderer.invoke('disable-loopback-audio'),
+    },
 
     // Platform detection
     platform: process.platform,

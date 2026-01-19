@@ -95,6 +95,11 @@ export default function InterviewSessionPage() {
     const [showAudioSettings, setShowAudioSettings] = useState(false)
     const [selectedElectronSource, setSelectedElectronSource] = useState<string | null>(null) // Electron audio source ID
 
+    // Web Pre-selection State
+    const [webDisplayStream, setWebDisplayStream] = useState<MediaStream | null>(null)
+    const [connectedTabName, setConnectedTabName] = useState<string | null>(null)
+    const [isConnectingTab, setIsConnectingTab] = useState(false)
+
     const socketRef = useRef<WebSocket | null>(null)
     const timerRef = useRef<NodeJS.Timeout | null>(null)
     const audioContextRef = useRef<AudioContext | null>(null)
@@ -185,7 +190,7 @@ export default function InterviewSessionPage() {
         job_descriptions (*),
         companies (*)
       `)
-            .eq('id', params.id)
+            .eq('id', params?.id as string)
             .single()
 
         if (interviewData) {
@@ -209,7 +214,7 @@ export default function InterviewSessionPage() {
             const { data: qData } = await supabase
                 .from('questions')
                 .select('id, text, created_at, generated_answers(answer_text)')
-                .eq('interview_id', params.id)
+                .eq('interview_id', params?.id as string)
                 .order('created_at', { ascending: true })
 
             if (qData) {
@@ -227,7 +232,7 @@ export default function InterviewSessionPage() {
             const { data: tData } = await supabase
                 .from('transcripts')
                 .select('*')
-                .eq('interview_id', params.id)
+                .eq('interview_id', params?.id as string)
                 .order('created_at', { ascending: true })
 
             if (tData) {
@@ -248,7 +253,7 @@ export default function InterviewSessionPage() {
             if (user && interviewData) {
                 // Legacy context (still useful for raw data access)
                 const context = await loadPreviousRounds(
-                    params.id as string,
+                    params?.id as string,
                     interviewData.application_id || null,
                     interviewData.company_id || null,
                     user.id
@@ -260,7 +265,7 @@ export default function InterviewSessionPage() {
                     interviewData.application_id || null,
                     interviewData.company_id || null,
                     user.id,
-                    params.id as string
+                    params?.id as string
                 )
                 setMultiRoundMemory(smartMemory)
 
@@ -308,7 +313,7 @@ export default function InterviewSessionPage() {
         const { data, error } = await supabase
             .from('questions')
             .insert({
-                interview_id: params.id as string,
+                interview_id: params?.id as string,
                 user_id: userId.current,
                 text: questionText,
                 detected_at: new Date().toISOString(),
@@ -338,13 +343,13 @@ export default function InterviewSessionPage() {
 
         console.log('💾 Saving generated answer to database:', {
             questionId,
-            interviewId: params.id,
+            interviewId: params?.id as string,
             userId: userId.current,
             answerLength: answerText.length
         })
 
         const { data, error } = await supabase.from('generated_answers').insert({
-            interview_id: params.id as string,
+            interview_id: params?.id as string,
             user_id: userId.current,
             question_id: questionId,
             answer_text: answerText,
@@ -360,7 +365,7 @@ export default function InterviewSessionPage() {
 
     const saveTranscriptSegment = async (text: string, speaker: string = 'interviewer') => {
         await supabase.from('transcripts').insert({
-            interview_id: params.id as string,
+            interview_id: params?.id as string,
             text,
             speaker,
             timestamp_ms: elapsedTime * 1000,
@@ -509,7 +514,7 @@ export default function InterviewSessionPage() {
                                         input_tokens: data.usage.inputTokens || 0,
                                         output_tokens: data.usage.outputTokens || 0,
                                         cost_cents: data.usage.costCents || 0,
-                                        interview_id: params.id as string
+                                        interview_id: params?.id as string
                                     }).then(() => console.log('📊 Usage tracked'))
                                 }
 
@@ -551,7 +556,7 @@ export default function InterviewSessionPage() {
     }, [isGenerating, resume, jobDescription, company, interview, coaching, transcriptSegments, multiRoundMemory])
 
     // SERVERLESS ARCHITECTURE: Use Deepgram Hook (Direct Client -> Deepgram)
-    const { connect, connectElectron, disconnect, toggleMicMute, isMicMuted, status: connectionStatus } = useDeepgram({
+    const { connect, connectElectron, connectStealth, disconnect, toggleMicMute, isMicMuted, status: connectionStatus } = useDeepgram({
         onTranscript: (text, isFinal, speaker) => {
             if (isFinal) {
                 const segmentId = `${Date.now()}-${speaker}`
@@ -611,21 +616,84 @@ export default function InterviewSessionPage() {
 
         try {
             // Detect Electron environment
-            const isElectronEnv = typeof window !== 'undefined' && window.electron
+            const electron = typeof window !== 'undefined' ? (window as any).electron : null
+            const isElectronApp = !!electron
 
-            // Use Electron-specific path if available and source is selected
-            if (isElectronEnv && useSystemAudio && selectedElectronSource) {
-                console.log('🚀 Using Electron audio capture with source:', selectedElectronSource)
-                await connectElectron(selectedElectronSource, selectedMicId)
-            } else {
-                // Fallback to web (getDisplayMedia)
-                console.log('🌐 Using web audio capture')
+            // 1. Stealth Mode (Electron-only, prioritized)
+            if (isElectronApp && useSystemAudio) {
+                console.log('🔇 Using STEALTH AUDIO (Native Loopback) - Fully Invisible')
+                await connectStealth(selectedMicId)
+            }
+            // 2. Web Pre-selected Tab
+            else if (useSystemAudio && !isElectronApp && webDisplayStream) {
+                console.log('🌐 Using pre-selected web tab audio capture')
+                await connect(true, selectedMicId, webDisplayStream)
+            }
+            // 3. Fallback / Standard Web
+            else {
+                console.log('🌐 Using standard web capture')
                 await connect(useSystemAudio, selectedMicId)
             }
+
+            setIsRecording(true)
+            setElapsedTime(0)
         } catch (e: any) {
-            setError(e.message)
+            console.error('Failed to start:', e)
+            setError(e.message || 'Could not start recording')
         }
     }
+
+    // Pre-select tab for Web version
+    const handleConnectTab = useCallback(async () => {
+        setIsConnectingTab(true)
+        setError(null)
+        try {
+            console.log('🌐 Opening browser tab picker for early connection...')
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: { width: 1, height: 1, frameRate: 1 },
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    // @ts-ignore - Chrome hint
+                    systemAudio: 'include',
+                },
+                // @ts-ignore - Chrome constraints
+                preferCurrentTab: false,
+                surfaceSwitching: 'include',
+                selfBrowserSurface: 'exclude',
+                monitorTypeSurfaces: 'exclude'
+            })
+
+            const audioTracks = stream.getAudioTracks()
+            if (audioTracks.length === 0) {
+                stream.getTracks().forEach(t => t.stop())
+                throw new Error('No audio found. Please select "Browser Tab" and check "Share tab audio".')
+            }
+
+            // Get the name of the tab if possible
+            const videoTrack = stream.getVideoTracks()[0]
+            const tabName = videoTrack?.label || 'Interview Tab'
+            setConnectedTabName(tabName)
+            setWebDisplayStream(stream)
+            console.log(`✅ Web tab connected: ${tabName}`)
+
+            // Handle user stopping share manually
+            audioTracks[0].onended = () => {
+                console.log('🛑 Tab connection stopped by user')
+                setWebDisplayStream(null)
+                setConnectedTabName(null)
+            }
+
+        } catch (e: any) {
+            console.error('Failed to pre-select tab:', e)
+            if (e.name !== 'NotAllowedError') {
+                setError(e.message || 'Failed to connect tab')
+            }
+        } finally {
+            setIsConnectingTab(false)
+        }
+    }, [])
 
     const toggleStealthMode = async () => {
         const nextState = !isStealthMode
@@ -706,7 +774,7 @@ export default function InterviewSessionPage() {
 
             // Save summary to database for future multi-round context
             await saveInterviewSummary(
-                params.id as string,
+                params?.id as string,
                 userId.current,
                 finalMemory,
                 currentSessionQAs
@@ -725,7 +793,7 @@ export default function InterviewSessionPage() {
             actual_duration_seconds: elapsedTime,
             total_questions: coaching.length,
             total_answers_generated: coaching.length,
-        }).eq('id', params.id)
+        }).eq('id', params?.id as string)
 
         // Update local state to show completed view
         setInterview(prev => prev ? { ...prev, session_status: 'completed' } : null)
@@ -735,7 +803,7 @@ export default function InterviewSessionPage() {
         setLoading(true)
         await supabase.from('interviews').update({
             session_status: 'in_progress'
-        }).eq('id', params.id)
+        }).eq('id', params?.id as string)
 
         setInterview(prev => prev ? { ...prev, session_status: 'in_progress' } : null)
 
@@ -768,11 +836,8 @@ export default function InterviewSessionPage() {
     const hasContext = resume?.content || jobDescription?.content || company?.name
     const hasMultiRoundContext = multiRoundContext && multiRoundContext.previousRounds.length > 0
 
-    // STEALTH MODE: Render absolutely nothing (blank screen) if active.
-    // Logic hooks (audio, etc.) above still run.
-    if (isStealthMode) {
-        return <div style={{ minHeight: '100vh', background: 'black' }} />
-    }
+    // STEALTH MODE: Removed render-blocking black screen.
+    // We will keep the app visible to the user while capturing audio.
 
     return (
         <div style={{ height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column' }}>
@@ -837,6 +902,9 @@ export default function InterviewSessionPage() {
                                 toggleMicMute={toggleMicMute}
                                 isRecording={isRecording}
                                 audioDevices={audioDevices}
+                                onConnectTab={handleConnectTab}
+                                connectedTabName={connectedTabName}
+                                isConnectingTab={isConnectingTab}
                             />
 
                             {/* Electron-Specific: Audio Source Selector */}

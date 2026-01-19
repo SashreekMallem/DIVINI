@@ -12,6 +12,10 @@ interface AudioSettingsPanelProps {
     toggleMicMute: () => void
     isRecording: boolean
     audioDevices: MediaDeviceInfo[]
+    // Web Pre-selection props
+    onConnectTab?: () => void
+    connectedTabName?: string | null
+    isConnectingTab?: boolean
 }
 
 export function AudioSettingsPanel({
@@ -22,7 +26,10 @@ export function AudioSettingsPanel({
     isMicMuted,
     toggleMicMute,
     isRecording,
-    audioDevices
+    audioDevices,
+    onConnectTab,
+    connectedTabName,
+    isConnectingTab
 }: AudioSettingsPanelProps) {
     const [browserInfo, setBrowserInfo] = useState<{
         name: string
@@ -183,7 +190,13 @@ export function AudioSettingsPanel({
 
                     {/* Toggle Switch */}
                     <button
-                        onClick={() => setUseSystemAudio(!useSystemAudio)}
+                        onClick={() => {
+                            if (useSystemAudio) {
+                                // If turning off, clear pre-selection if needed? 
+                                // Actually better to let the parent handle it
+                            }
+                            setUseSystemAudio(!useSystemAudio)
+                        }}
                         disabled={isRecording || !browserInfo.supportsTabAudio}
                         style={{
                             position: 'relative',
@@ -210,6 +223,47 @@ export function AudioSettingsPanel({
                         }} />
                     </button>
                 </div>
+
+                {/* Pre-selection Button (Web Only) */}
+                {useSystemAudio && browserInfo.supportsTabAudio && !isRecording && !window.electron && (
+                    <div style={{ marginBottom: '12px' }}>
+                        <button
+                            onClick={onConnectTab}
+                            disabled={isConnectingTab}
+                            style={{
+                                width: '100%',
+                                padding: '10px',
+                                background: connectedTabName ? 'rgba(34, 197, 94, 0.1)' : 'rgba(99, 102, 241, 0.1)',
+                                border: connectedTabName ? '1px solid rgba(34, 197, 94, 0.2)' : '1px solid rgba(99, 102, 241, 0.2)',
+                                borderRadius: '8px',
+                                color: connectedTabName ? '#4ade80' : '#818cf8',
+                                fontSize: '13px',
+                                fontWeight: 600,
+                                cursor: isConnectingTab ? 'wait' : 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '8px',
+                                transition: 'all 0.2s'
+                            }}
+                        >
+                            {isConnectingTab ? (
+                                <div style={{ width: '14px', height: '14px', border: '2px solid currentColor', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                            ) : connectedTabName ? (
+                                <Volume2 style={{ width: '16px', height: '16px' }} />
+                            ) : (
+                                <Monitor style={{ width: '16px', height: '16px' }} />
+                            )}
+                            {isConnectingTab ? 'Opening Picker...' : connectedTabName ? `Connected: ${connectedTabName.slice(0, 20)}${connectedTabName.length > 20 ? '...' : ''}` : 'Connect Audio Source'}
+                        </button>
+
+                        {connectedTabName && (
+                            <p style={{ fontSize: '10px', color: '#4ade80', marginTop: '4px', textAlign: 'center', opacity: 0.8 }}>
+                                ✓ Audio connection verified
+                            </p>
+                        )}
+                    </div>
+                )}
 
                 {/* Instructions when enabled */}
                 {useSystemAudio && browserInfo.supportsTabAudio && (

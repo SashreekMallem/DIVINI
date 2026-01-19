@@ -2,6 +2,13 @@ const { app, BrowserWindow, shell, ipcMain } = require('electron')
 const { spawn } = require('child_process')
 const path = require('path')
 const { StealthManager } = require('./stealth')
+const { initMain } = require('electron-audio-loopback')
+
+// Initialize loopback plugin BEFORE app is ready
+initMain({
+    forceCoreAudioTap: true, // Critical for stealth on macOS
+    loopbackWithMute: false,
+})
 
 let mainWindow
 let nextServer
@@ -101,7 +108,7 @@ function setupIpcHandlers() {
         return stealthManager ? stealthManager.manualRestore() : { success: false }
     })
 
-    // Audio source selection
+    // Audio source selection (legacy - still useful for source list)
     const { getAudioSources } = require('./audioSources')
     ipcMain.handle('audio:getSources', async () => {
         try {
@@ -111,6 +118,11 @@ function setupIpcHandlers() {
             return []
         }
     })
+
+    // === STEALTH AUDIO INITIALIZATION ===
+    // This allows getDisplayMedia to capture system audio without screen recording permission
+    // on supported macOS versions.
+    // The library automatically registers 'enable-loopback-audio' and 'disable-loopback-audio' handlers.
 
     // Window controls (for custom titlebar if needed)
     ipcMain.on('window:minimize', () => mainWindow?.minimize())
