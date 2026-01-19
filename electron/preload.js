@@ -30,6 +30,9 @@ contextBridge.exposeInMainWorld('electron', {
         }
     },
 
+    // Audio source selection (for dual-channel capture)
+    getAudioSources: () => ipcRenderer.invoke('audio:getSources'),
+
     // Platform detection
     platform: process.platform,
 

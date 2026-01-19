@@ -101,6 +101,17 @@ function setupIpcHandlers() {
         return stealthManager ? stealthManager.manualRestore() : { success: false }
     })
 
+    // Audio source selection
+    const { getAudioSources } = require('./audioSources')
+    ipcMain.handle('audio:getSources', async () => {
+        try {
+            return await getAudioSources()
+        } catch (error) {
+            console.error('Failed to get audio sources:', error)
+            return []
+        }
+    })
+
     // Window controls (for custom titlebar if needed)
     ipcMain.on('window:minimize', () => mainWindow?.minimize())
     ipcMain.on('window:maximize', () => {

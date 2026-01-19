@@ -296,6 +296,84 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
         }
     }, [])
 
+    // Electron-specific: Use desktopCapturer source ID
+    const connectElectron = useCallback(async (sourceId: string, selectedMicId?: string) => {
+        try {
+            setStatus('connecting')
+            console.log('🚀 Starting Electron audio capture...')
+
+            // 1. Get microphone
+            const micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
+                    sampleRate: 16000,
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                }
+            })
+
+            // 2. Get system audio using Electron's desktopCapturer source
+            // @ts-ignore - Electron-specific API
+            const displayStream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: {
+                    // @ts-ignore
+                    mandatory: {
+                        chromeMediaSource: 'desktop',
+                        chromeMediaSourceId: sourceId
+                    }
+                }
+            })
+
+            // ===== Setup WebSocket connections =====
+
+            // Mic channel
+            console.log('🔌 Connecting mic to Deepgram...')
+            const micSocket = await createDeepgramSocket('You')
+            micSocketRef.current = micSocket
+            micStreamRef.current = micStream
+            setupAudioPipeline(micStream, micSocket, micContextRef, micGainRef)
+            console.log('✅ Mic ready')
+
+            // System audio channel (from Electron source)
+            const audioTrack = displayStream.getAudioTracks()[0]
+
+            if (!audioTrack) {
+                console.warn('⚠️ No audio track from selected source')
+                onError('Selected source has no audio. Try a different source.')
+            } else {
+                console.log('🔌 Connecting system audio to Deepgram...')
+                const sysSocket = await createDeepgramSocket('Interviewer')
+                sysSocketRef.current = sysSocket
+
+                const audioOnlyStream = new MediaStream([audioTrack])
+                sysStreamRef.current = audioOnlyStream
+
+                // Stop video track (don't need it)
+                displayStream.getVideoTracks().forEach(t => t.stop())
+
+                setupAudioPipeline(audioOnlyStream, sysSocket, sysContextRef)
+                console.log('✅ System audio ready (Interviewer)')
+
+                // Handle track ending
+                audioTrack.onended = () => {
+                    console.log('🛑 Audio track ended')
+                    sysSocketRef.current?.close()
+                }
+            }
+
+            setStatus('connected')
+            setIsProcessing(true)
+            console.log('🎉 Electron audio active!')
+
+        } catch (e: any) {
+            console.error('❌ Electron capture failed:', e)
+            setStatus('disconnected')
+            onError(e.message || 'Could not capture Electron audio')
+        }
+    }, [createDeepgramSocket, setupAudioPipeline, onError])
+
     // Legacy compatibility
     const startStreaming = useCallback(async () => {
         console.log('ℹ️ startStreaming is now handled by connect()')
@@ -303,6 +381,7 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
 
     return {
         connect,
+        connectElectron,
         disconnect,
         startStreaming,
         toggleMicMute,
