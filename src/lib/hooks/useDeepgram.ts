@@ -158,12 +158,16 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
             setStatus('connecting')
             console.log('🚀 Starting audio capture...')
 
-            // ===== STEP 1: Setup Microphone Channel =====
-            console.log('🎙️ Setting up Microphone channel...')
-            const micSocket = await createDeepgramSocket('You')
-            micSocketRef.current = micSocket
+            // ===== CRITICAL: Capture ALL media streams FIRST =====
+            // Must call getUserMedia and getDisplayMedia while still in the user gesture context
+            // BEFORE any other async operations
 
-            const micStream = await navigator.mediaDevices.getUserMedia({
+            let micStream: MediaStream
+            let displayStream: MediaStream | null = null
+
+            // 1. Get microphone (required)
+            console.log('🎙️ Requesting microphone access...')
+            micStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
                     sampleRate: 16000,
@@ -172,84 +176,81 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
                     noiseSuppression: true
                 }
             })
-            micStreamRef.current = micStream
-            setupAudioPipeline(micStream, micSocket, micContextRef, micGainRef)
-            console.log('✅ Microphone channel ready')
 
-            // ===== STEP 2: Setup System Audio Channel (if enabled) =====
+            // 2. Get screen share (optional - still in gesture context!)
             if (useSystemAudio) {
-                console.log('🔊 Setting up System Audio channel...')
-                console.log('📋 Please select a browser TAB and check "Share tab audio"')
+                console.log('🔊 Requesting screen share...')
+                console.log('   → Select a BROWSER TAB')
+                console.log('   → Check "Share tab audio" ✓')
 
                 try {
-                    // Request screen/tab share - this opens the browser picker
-                    // IMPORTANT: Must have video:true, but we'll stop the video track immediately
-                    const displayStream = await navigator.mediaDevices.getDisplayMedia({
-                        video: {
-                            width: 1,
-                            height: 1,
-                            frameRate: 1
-                        },
+                    displayStream = await navigator.mediaDevices.getDisplayMedia({
+                        video: { width: 1, height: 1, frameRate: 1 },
                         audio: {
                             echoCancellation: false,
                             noiseSuppression: false,
                             autoGainControl: false
                         }
                     })
-
-                    // Check if we got audio
-                    const audioTracks = displayStream.getAudioTracks()
-
-                    // Stop video track immediately - we only need audio
-                    displayStream.getVideoTracks().forEach(track => {
-                        console.log('🎬 Stopping video track (not needed)')
-                        track.stop()
-                    })
-
-                    if (audioTracks.length === 0) {
-                        console.warn('⚠️ No audio track! User may not have selected "Share tab audio"')
-                        onError('No audio captured. Please select a tab and check "Share tab audio" or "Share system audio".')
-                        // Continue with mic-only mode
-                    } else {
-                        console.log('🎵 Got audio track:', audioTracks[0].label)
-
-                        // Create Deepgram connection for system audio
-                        const sysSocket = await createDeepgramSocket('Interviewer')
-                        sysSocketRef.current = sysSocket
-
-                        // Create audio-only stream from the display audio
-                        const audioOnlyStream = new MediaStream(audioTracks)
-                        sysStreamRef.current = audioOnlyStream
-
-                        setupAudioPipeline(audioOnlyStream, sysSocket, sysContextRef)
-                        console.log('✅ System Audio channel ready (Interviewer)')
-
-                        // Handle when user stops sharing via browser UI
-                        audioTracks[0].onended = () => {
-                            console.log('🛑 User stopped sharing audio')
-                            sysSocketRef.current?.close()
-                        }
-                    }
                 } catch (e: any) {
                     if (e.name === 'NotAllowedError') {
-                        console.warn('⚠️ User cancelled screen share')
+                        console.warn('⚠️ Screen share cancelled')
                         onError('Screen share cancelled. Running in microphone-only mode.')
                     } else {
-                        console.error('❌ System audio error:', e.message)
-                        onError(`System audio failed: ${e.message}. Running in microphone-only mode.`)
+                        console.error('❌ Screen share failed:', e.message)
+                        onError(`Screen share failed: ${e.message}`)
                     }
-                    // Continue with mic-only mode
+                    displayStream = null
+                }
+            }
+
+            // ===== NOW create WebSocket connections (can be async) =====
+
+            // Setup Microphone Channel
+            console.log('🔌 Connecting mic to Deepgram...')
+            const micSocket = await createDeepgramSocket('You')
+            micSocketRef.current = micSocket
+            micStreamRef.current = micStream
+            setupAudioPipeline(micStream, micSocket, micContextRef, micGainRef)
+            console.log('✅ Mic ready')
+
+            // Setup System Audio Channel (if display stream was captured)
+            if (displayStream) {
+                const audioTracks = displayStream.getAudioTracks()
+
+                // Stop video track (don't need it)
+                displayStream.getVideoTracks().forEach(t => t.stop())
+
+                if (audioTracks.length === 0) {
+                    console.warn('⚠️ No audio! Did you check "Share tab audio"?')
+                    onError('No audio captured. Make sure to check "Share tab audio".')
+                } else {
+                    console.log('🔌 Connecting system audio to Deepgram...')
+                    const sysSocket = await createDeepgramSocket('Interviewer')
+                    sysSocketRef.current = sysSocket
+
+                    const audioOnlyStream = new MediaStream(audioTracks)
+                    sysStreamRef.current = audioOnlyStream
+
+                    setupAudioPipeline(audioOnlyStream, sysSocket, sysContextRef)
+                    console.log('✅ System audio ready (Interviewer)')
+
+                    // Handle user stopping share
+                    audioTracks[0].onended = () => {
+                        console.log('🛑 Share stopped')
+                        sysSocketRef.current?.close()
+                    }
                 }
             }
 
             setStatus('connected')
             setIsProcessing(true)
-            console.log('🎉 Audio capture started!')
+            console.log('🎉 Audio active!')
 
         } catch (e: any) {
-            console.error('❌ Connection failed:', e)
+            console.error('❌ Failed:', e)
             setStatus('disconnected')
-            onError(e.message || 'Could not start audio capture')
+            onError(e.message || 'Could not start audio')
         }
     }, [createDeepgramSocket, setupAudioPipeline, onError])
 
