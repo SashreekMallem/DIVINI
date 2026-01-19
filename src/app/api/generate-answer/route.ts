@@ -62,10 +62,10 @@ CRITICAL RULES:
 
 ANSWER LENGTH REQUIREMENTS (speaking pace = 140 words/minute):
 - Simple/Quick questions (Yes/No, one fact): 80-120 words (30-50 seconds)
-- Introduction questions ("Tell me about yourself"): 250-350 words (2-2.5 minutes)
-- Behavioral STAR questions ("Tell me about a time..."): 350-500 words (2.5-3.5 minutes) - GIVE DETAILED ANSWERS
-- Technical explanations: 200-350 words (1.5-2.5 minutes)
-- Case/Product/Strategy questions: 400-600 words (3-4 minutes)
+- Introduction questions ("Tell me about yourself"): 350-450 words (3-3.5 minutes)
+- Behavioral STAR questions ("Tell me about a time..."): 450-600 words (3.5-5.5 minutes) - GIVE DETAILED ANSWERS
+- Technical explanations: 350-450 words (2.5-3.5 minutes)
+- Case/Product/Strategy questions: 400-600 words (6-8 minutes)
 
 For BEHAVIORAL questions, use STAR format with SPECIFIC details:
 - Situation (10%): Brief context with specifics (company name, team size, timeline)
@@ -92,7 +92,7 @@ ${contextBlock}
       temperature: 0.8,
       topP: 0.95,
       topK: 40,
-      maxOutputTokens: 2000, // ~1500 words max for detailed answers
+      maxOutputTokens: 3000, // Supports up to ~2200 words for long 8-min answers
     }
 
     const result = await model.generateContentStream({

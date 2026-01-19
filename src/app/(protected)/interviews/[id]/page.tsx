@@ -593,11 +593,17 @@ export default function InterviewSessionPage() {
             // For now, let's look at the last added segment.
             setTranscriptSegments(prev => {
                 const last = prev[prev.length - 1]
-                // Log utterance end for debugging, but don't auto-trigger
                 if (last) {
                     console.log(`🔊 Utterance ended: [${last.speaker}] "${last.text.substring(0, 50)}..."`)
+
+                    // AUTO TRIGGER: If the interviewer said something, get an answer immediately.
+                    // No "question detection" filter - this ensures we never miss a question.
+                    // If they just said "Hello", we have prompt logic to handle it naturally.
+                    if (last.speaker === 'Interviewer') {
+                        console.log('⚡ Auto-triggering Gemini for Interviewer segment...')
+                        generateAnswer(last.text)
+                    }
                 }
-                // Auto-detection removed - user manually clicks "Generate" or triggers via UI
                 return prev
             })
         },
