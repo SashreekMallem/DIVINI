@@ -593,18 +593,11 @@ export default function InterviewSessionPage() {
             // For now, let's look at the last added segment.
             setTranscriptSegments(prev => {
                 const last = prev[prev.length - 1]
-                if (last && last.speaker === 'Interviewer' && detectQuestion(last.text)) {
-                    console.log('⚡ Detected question (Serverless) - Triggering Gemini!')
-                    generateAnswer(last.text)
-                } else if (last && last.speaker === 'You') {
-                    // Check if 'You' asked a question (maybe self-practice?)
-                    // Usually we only trigger on Interviewer, but if using Mic-only mode, 'You' might be roleplaying.
-                    // The original logic checked if speaker === 'Interviewer' OR !useSystemAudio.
-                    if (!useSystemAudio && detectQuestion(last.text)) {
-                        console.log('⚡ Detected question (Mic Only) - Triggering Gemini!')
-                        generateAnswer(last.text)
-                    }
+                // Log utterance end for debugging, but don't auto-trigger
+                if (last) {
+                    console.log(`🔊 Utterance ended: [${last.speaker}] "${last.text.substring(0, 50)}..."`)
                 }
+                // Auto-detection removed - user manually clicks "Generate" or triggers via UI
                 return prev
             })
         },

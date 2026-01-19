@@ -49,68 +49,98 @@ export async function POST(request: NextRequest) {
       contextBlock = contextParts.length > 0 ? contextParts.join('\n\n---\n\n') : ''
     }
 
-    const prompt = `You are a job candidate in a real interview. Generate the EXACT words to speak.
+    // System instruction for persona and behavioral guidelines
+    const systemInstruction = `You are an expert interview coach generating SPOKEN answers for a job candidate.
+
+CRITICAL RULES:
+1. Output ONLY the words the candidate should speak - nothing else
+2. NEVER output meta-commentary like "This is a behavioral question" or "I'll aim for X words"
+3. NEVER output category labels like "QUICK:", "BEHAVIORAL:", "STAR:" etc.
+4. First person only ("I", "my", "we")
+5. Be conversational and natural - this will be READ ALOUD
+6. Natural filler phrases are okay ("So,", "Well,", "You know,") - sound human, not robotic
+
+ANSWER LENGTH REQUIREMENTS (speaking pace = 140 words/minute):
+- Simple/Quick questions (Yes/No, one fact): 80-120 words (30-50 seconds)
+- Introduction questions ("Tell me about yourself"): 250-350 words (2-2.5 minutes)
+- Behavioral STAR questions ("Tell me about a time..."): 350-500 words (2.5-3.5 minutes) - GIVE DETAILED ANSWERS
+- Technical explanations: 200-350 words (1.5-2.5 minutes)
+- Case/Product/Strategy questions: 400-600 words (3-4 minutes)
+
+For BEHAVIORAL questions, use STAR format with SPECIFIC details:
+- Situation (10%): Brief context with specifics (company name, team size, timeline)
+- Task (15%): Your specific responsibility  
+- Action (50-60%): Detailed steps YOU took - this is the MEAT of your answer
+- Result (20%): Quantified outcomes (percentages, revenue, time saved, etc.)
+
+CONSISTENCY: Stay consistent with previously given AI_SUGGESTED_ANSWER entries.
+USE RESUME DETAILS: Reference specific achievements, numbers, and experiences from the candidate's resume.
+BE THOROUGH: Give complete, detailed answers. Don't cut yourself short.`
+
+    const prompt = `${systemInstruction}
 
 === CONTEXT ===
-- INTERVIEWER_QUESTION: What was asked
-- AI_SUGGESTED_ANSWER: Your previous answers (stay consistent)
-- CANDIDATE RESUME: Your background
-
 ${contextBlock}
 
-=== QUESTION ===
+=== CURRENT QUESTION ===
 "${question}"
 
-=== ANSWER LENGTH GUIDE (speaking pace ~140 words/minute) ===
-First, identify the question type and generate the appropriate length:
+=== YOUR SPOKEN ANSWER ===`
 
-QUICK (30-45 sec, ~80 words):
-- Yes/No questions, simple factual, "What's your strength/weakness?"
+    // Use generation config for better control
+    const generationConfig = {
+      temperature: 0.8,
+      topP: 0.95,
+      topK: 40,
+      maxOutputTokens: 2000, // ~1500 words max for detailed answers
+    }
 
-INTRO (60-90 sec, ~180 words):
-- "Tell me about yourself", "Why this company?", "Walk through your resume"
+    const result = await model.generateContentStream({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig,
+    })
 
-BEHAVIORAL (2-2.5 min, ~320 words):
-- "Tell me about a time...", "Describe a situation...", "Give an example of..."
-- Use STAR: Situation → Task → Action → Result
-
-TECHNICAL (1-2 min, ~200 words):
-- Concept explanations, "How does X work?", "Difference between X and Y"
-
-TECHNICAL DEEP (2-3 min, ~350 words):
-- System design, architecture, complex problem solving
-
-CASE/PRODUCT (2-3 min, ~350 words):
-- "How would you improve X?", product design, strategy questions
-
-=== RULES ===
-1. Decide the question type, then generate EXACTLY that many words
-2. Stay CONSISTENT with previous AI_SUGGESTED_ANSWER entries
-3. Use SPECIFIC details from resume (numbers, companies, achievements)
-4. First person ("I"), natural and conversational
-5. CRITICAL: Start speaking immediately - NO phrases like "Okay, here's my answer", "Let me tell you", "I would say", etc.
-6. NO meta-commentary - just the answer
-7. You CAN use bullet points, numbered lists, or natural paragraphs - whatever fits the question best
-8. Interview type: ${interviewType || 'general'}
-
-YOUR ANSWER (start speaking immediately, no intro phrases):`
-
-    const result = await model.generateContentStream(prompt)
-
-    // Create a streaming response
+    // Create a streaming response - pass through directly for natural flow
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder()
 
+        // Only strip true meta-commentary, not natural speech patterns
+        const metaPatterns = [
+          /^this is (a|an) (quick|intro|behavioral|technical|case|product) question[,.]?\s*/i,
+          /^(quick|intro|behavioral|technical|case|product)[,:.]?\s+/i,
+          /^star[,:.]?\s+/i,
+          /^(i'?ll|i will) (aim for|target|generate)\s*~?\d+\s*words?[,.]?\s*/i,
+          /^targeting\s*~?\d+\s*words?[,.]?\s*/i,
+          /^["':*•]+\s*/,
+        ]
+
         try {
           let accumulatedAnswer = ''
           let inputTokens = 0
+          let hasStartedOutput = false
+          let skipBuffer = ''
 
           for await (const chunk of result.stream) {
             const chunkText = chunk.text()
             accumulatedAnswer += chunkText
 
-            if (chunkText) {
+            // Only filter meta-commentary at the very start
+            if (!hasStartedOutput) {
+              skipBuffer += chunkText
+
+              if (skipBuffer.length > 30) {
+                let cleanedStart = skipBuffer
+                for (const pattern of metaPatterns) {
+                  cleanedStart = cleanedStart.replace(pattern, '')
+                }
+
+                if (cleanedStart.trim().length > 0) {
+                  hasStartedOutput = true
+                  controller.enqueue(encoder.encode(JSON.stringify({ text: cleanedStart }) + '\n'))
+                }
+              }
+            } else if (chunkText) {
               controller.enqueue(encoder.encode(JSON.stringify({ text: chunkText }) + '\n'))
             }
 
@@ -119,25 +149,23 @@ YOUR ANSWER (start speaking immediately, no intro phrases):`
             }
           }
 
-          const metaPatterns = [
-            /^okay,?\s*(here'?s|this is|let me|designing)/i,
-            /^so,?\s*(here'?s|let me|i would)/i,
-            /^let me\s+(tell you|explain|share)/i,
-            /^i would\s+(say|tell|explain)/i,
-            /^here'?s\s+(my|the)\s+answer/i,
-            /^this is\s+(a|an)\s+(case|product|technical)/i,
-            /^(this is|it'?s|that'?s)\s+(a|an)\s+(quick|intro|behavioral|technical|case|product)\s+question[.,]?\s*/i,
-            /^(a|an)\s+(quick|intro|behavioral|technical|case|product)\s+question[.,]?\s*(so\s+)?(i\s+will\s+aim\s+for|i'll\s+aim\s+for|targeting)\s*[~]?\d+\s*words?[.,]?\s*/i,
-            /^(i'?ll|i\s+will)\s+(aim\s+for|target|generate)\s*[~]?\d+\s*words?[.,]?\s*/i,
-            /^targeting\s*[~]?\d+\s*words?[.,]?\s*/i,
-          ]
+          // Flush remaining buffer
+          if (!hasStartedOutput && skipBuffer.trim().length > 0) {
+            let cleanedStart = skipBuffer
+            for (const pattern of metaPatterns) {
+              cleanedStart = cleanedStart.replace(pattern, '')
+            }
+            if (cleanedStart.trim().length > 0) {
+              controller.enqueue(encoder.encode(JSON.stringify({ text: cleanedStart }) + '\n'))
+            }
+          }
 
+          // Final cleanup
           let cleanAnswer = accumulatedAnswer
           for (const pattern of metaPatterns) {
-            cleanAnswer = cleanAnswer.replace(pattern, '').trim()
+            cleanAnswer = cleanAnswer.replace(pattern, '')
           }
-          cleanAnswer = cleanAnswer.replace(/^["':*•\-\s]+/, '').trim()
-          cleanAnswer = cleanAnswer.replace(/^okay,?\s+/i, '').trim()
+          cleanAnswer = cleanAnswer.trim()
 
           const outputTokens = Math.ceil(cleanAnswer.length / 4)
           const costCents = (inputTokens * 0.00001) + (outputTokens * 0.00004)
