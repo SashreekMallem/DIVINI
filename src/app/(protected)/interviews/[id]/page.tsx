@@ -577,31 +577,21 @@ export default function InterviewSessionPage() {
                 transcriptRef.current.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: 'smooth' })
             }
         },
-        onUtteranceEnd: () => {
-            // Trigger Gemini on UtteranceEnd (Speech stopped)
-            // accessing state directly here might be stale if not careful, 
-            // but we can use the transcript saved in state or passed in callback?
-            // Actually, page.tsx doesn't track accumulated transcript well outside of segments.
-            // Let's rely on the fact that if UtteranceEnd fires, the last "final" transcript was the end.
-            // A better way is to pass the text to onUtteranceEnd in the hook, but for now let's just trigger logic.
-            // We'll use a ref to track the last final text if needed, or just let 'detectQuestion' run on latest segment?
-            // Simplified: The previous logic triggered generateAnswer(accumulatedTranscript).
-            // Let's modify useDeepgram to return the current transcript/utterance?
-            // Or simpler: Just rely on the last segment added.
+        onUtteranceEnd: (speaker: 'You' | 'Interviewer') => {
+            // Trigger Gemini only when the INTERVIEWER finishes speaking
+            // The speaker parameter now comes directly from the dual-channel hook
 
-            // NOTE: Ideally we want to pass the text that just ended. 
-            // For now, let's look at the last added segment.
             setTranscriptSegments(prev => {
-                const last = prev[prev.length - 1]
-                if (last) {
-                    console.log(`🔊 Utterance ended: [${last.speaker}] "${last.text.substring(0, 50)}..."`)
+                // Find the last segment from this specific speaker
+                const lastFromSpeaker = [...prev].reverse().find(seg => seg.speaker === speaker)
 
-                    // AUTO TRIGGER: If the interviewer said something, get an answer immediately.
-                    // No "question detection" filter - this ensures we never miss a question.
-                    // If they just said "Hello", we have prompt logic to handle it naturally.
-                    if (last.speaker === 'Interviewer') {
+                if (lastFromSpeaker) {
+                    console.log(`🔊 Utterance ended: [${speaker}] "${lastFromSpeaker.text.substring(0, 50)}..."`)
+
+                    // AUTO TRIGGER: Only generate answers for Interviewer segments
+                    if (speaker === 'Interviewer') {
                         console.log('⚡ Auto-triggering Gemini for Interviewer segment...')
-                        generateAnswer(last.text)
+                        generateAnswer(lastFromSpeaker.text)
                     }
                 }
                 return prev
@@ -609,7 +599,6 @@ export default function InterviewSessionPage() {
         },
         onError: (err) => {
             setError(err)
-            // setConnectionStatus('disconnected') // Managed by hook
         }
     })
 
@@ -618,7 +607,8 @@ export default function InterviewSessionPage() {
         setShowAudioSettings(false)
 
         try {
-            await connect()
+            // Pass useSystemAudio flag to enable dual-channel mode
+            await connect(useSystemAudio, selectedMicId)
         } catch (e: any) {
             setError(e.message)
         }
@@ -641,11 +631,11 @@ export default function InterviewSessionPage() {
         }
     }
 
-    // Effect to start streaming once connected
+    // Effect to start recording state and timer once connected
     useEffect(() => {
         if (connectionStatus === 'connected' && !isRecording) {
-            console.log('🎙️ Starting audio streaming (Serverless)...')
-            startStreaming(selectedMicId)
+            console.log('🎙️ Dual-channel audio streaming active...')
+            // Note: Streaming now starts in connect(), just update UI state here
             setIsRecording(true)
             timerRef.current = setInterval(() => setElapsedTime(prev => prev + 1), 1000)
 
@@ -656,7 +646,7 @@ export default function InterviewSessionPage() {
                 }).eq('id', interview.id)
             }
         }
-    }, [connectionStatus, isRecording, startStreaming, selectedMicId, interview?.id, supabase])
+    }, [connectionStatus, isRecording, interview?.id, supabase])
 
     // Note: Legacy audio processing functions removed in favor of useDeepgram hook
 
