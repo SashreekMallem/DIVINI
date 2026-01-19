@@ -180,7 +180,8 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
             // 2. Get screen share (optional - still in gesture context!)
             if (useSystemAudio) {
                 console.log('🔊 Requesting screen share...')
-                console.log('   → Select a BROWSER TAB')
+                console.log('   → Browser picker will open')
+                console.log('   → Select the TAB with your interview (Meet/Zoom/Teams)')
                 console.log('   → Check "Share tab audio" ✓')
 
                 try {
@@ -189,8 +190,14 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
                         audio: {
                             echoCancellation: false,
                             noiseSuppression: false,
-                            autoGainControl: false
-                        }
+                            autoGainControl: false,
+                            // @ts-ignore - Chrome-specific: suggests system audio option
+                            systemAudio: 'include',
+                        },
+                        // @ts-ignore - Chrome-specific constraints for better UX
+                        preferCurrentTab: false, // Show all tabs (user picks their Meet/Zoom tab)
+                        surfaceSwitching: 'include', // Allow switching tabs during interview
+                        selfBrowserSurface: 'exclude', // Don't allow sharing this tab (avoids mirrors)
                     })
                 } catch (e: any) {
                     if (e.name === 'NotAllowedError') {
