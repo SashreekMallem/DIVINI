@@ -36,6 +36,7 @@ import {
 import { useDeepgram } from '@/lib/hooks/useDeepgram'
 import { Check } from 'lucide-react'
 import { AudioSourceSelector } from '@/components/AudioSourceSelector'
+import { AudioSettingsPanel } from '@/components/AudioSettingsPanel'
 
 interface CoachingEntry {
     id: string
@@ -826,53 +827,27 @@ export default function InterviewSessionPage() {
 
                     {/* Audio Settings Panel (Absolute) */}
                     {showAudioSettings && (
-                        <div style={{ position: 'absolute', top: '70px', right: '140px', background: '#18181b', border: '1px solid #3f3f46', borderRadius: '12px', padding: '16px', zIndex: 50, width: '300px', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}>
-                            <h3 style={{ fontSize: '14px', fontWeight: 600, color: 'white', marginBottom: '12px' }}>Audio Configuration</h3>
-
-                            <div style={{ marginBottom: '12px' }}>
-                                <label style={{ display: 'block', fontSize: '12px', color: '#a1a1aa', marginBottom: '6px' }}>Your Microphone</label>
-                                <select
-                                    value={selectedMicId}
-                                    onChange={(e) => setSelectedMicId(e.target.value)}
-                                    style={{ width: '100%', background: '#27272a', border: '1px solid #3f3f46', borderRadius: '8px', padding: '8px', color: 'white', fontSize: '13px' }}
-                                >
-                                    {audioDevices.map(d => (
-                                        <option key={d.deviceId} value={d.deviceId}>{d.label || `Microphone ${d.deviceId.slice(0, 5)}...`}</option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            <div style={{ marginBottom: '12px' }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={useSystemAudio}
-                                        onChange={(e) => setUseSystemAudio(e.target.checked)}
-                                        style={{ width: '16px', height: '16px', accentColor: '#6366f1' }}
-                                    />
-                                    <span style={{ fontSize: '13px', color: 'white' }}>Capture System Audio (Dual Channel)</span>
-                                </label>
-                                <p style={{ fontSize: '11px', color: '#71717a', marginTop: '4px', marginLeft: '24px' }}>
-                                    Required for AI to hear the interviewer. When you start recording, you'll see a browser dialog to:
-                                    <br />1. Select the tab where your interview is (Zoom, Teams, etc.)
-                                    <br />2. Check "Share tab audio" checkbox
-                                    <br />3. Click "Share"
-                                </p>
-                            </div>
+                        <div style={{ position: 'absolute', top: '70px', right: '140px', zIndex: 50, width: '400px', boxShadow: '0 10px 30px rgba(0,0,0,0.7)' }}>
+                            <AudioSettingsPanel
+                                selectedMicId={selectedMicId}
+                                setSelectedMicId={setSelectedMicId}
+                                useSystemAudio={useSystemAudio}
+                                setUseSystemAudio={setUseSystemAudio}
+                                isMicMuted={isMicMuted}
+                                toggleMicMute={toggleMicMute}
+                                isRecording={isRecording}
+                                audioDevices={audioDevices}
+                            />
 
                             {/* Electron-Specific: Audio Source Selector */}
                             {typeof window !== 'undefined' && window.electron && useSystemAudio && !isRecording && (
-                                <AudioSourceSelector
-                                    onSourceSelected={setSelectedElectronSource}
-                                    selectedSourceId={selectedElectronSource}
-                                />
+                                <div style={{ marginTop: '12px' }}>
+                                    <AudioSourceSelector
+                                        onSourceSelected={setSelectedElectronSource}
+                                        selectedSourceId={selectedElectronSource}
+                                    />
+                                </div>
                             )}
-
-                            <div style={{ padding: '8px', background: 'rgba(234, 179, 8, 0.1)', borderRadius: '6px', border: '1px solid rgba(234, 179, 8, 0.2)' }}>
-                                <p style={{ fontSize: '11px', color: '#fbbf24' }}>
-                                    Tip: Provide distinct sources for "You" and "Interviewer" for best results.
-                                </p>
-                            </div>
                         </div>
                     )}
 
