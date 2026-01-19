@@ -35,6 +35,7 @@ import {
 } from '@/lib/utils/smartContextManager'
 import { useDeepgram } from '@/lib/hooks/useDeepgram'
 import { Check } from 'lucide-react'
+import { AudioSourceSelector } from '@/components/AudioSourceSelector'
 
 interface CoachingEntry {
     id: string
@@ -91,6 +92,7 @@ export default function InterviewSessionPage() {
     const [selectedMicId, setSelectedMicId] = useState<string>('')
     const [useSystemAudio, setUseSystemAudio] = useState(false) // Toggle for Dual Channel
     const [showAudioSettings, setShowAudioSettings] = useState(false)
+    const [selectedElectronSource, setSelectedElectronSource] = useState<string | null>(null) // Electron audio source ID
 
     const socketRef = useRef<WebSocket | null>(null)
     const timerRef = useRef<NodeJS.Timeout | null>(null)
@@ -548,7 +550,7 @@ export default function InterviewSessionPage() {
     }, [isGenerating, resume, jobDescription, company, interview, coaching, transcriptSegments, multiRoundMemory])
 
     // SERVERLESS ARCHITECTURE: Use Deepgram Hook (Direct Client -> Deepgram)
-    const { connect, disconnect, toggleMicMute, isMicMuted, status: connectionStatus } = useDeepgram({
+    const { connect, connectElectron, disconnect, toggleMicMute, isMicMuted, status: connectionStatus } = useDeepgram({
         onTranscript: (text, isFinal, speaker) => {
             if (isFinal) {
                 const segmentId = `${Date.now()}-${speaker}`
@@ -607,8 +609,18 @@ export default function InterviewSessionPage() {
         setShowAudioSettings(false)
 
         try {
-            // Pass useSystemAudio flag to enable dual-channel mode
-            await connect(useSystemAudio, selectedMicId)
+            // Detect Electron environment
+            const isElectronEnv = typeof window !== 'undefined' && window.electron
+
+            // Use Electron-specific path if available and source is selected
+            if (isElectronEnv && useSystemAudio && selectedElectronSource) {
+                console.log('🚀 Using Electron audio capture with source:', selectedElectronSource)
+                await connectElectron(selectedElectronSource, selectedMicId)
+            } else {
+                // Fallback to web (getDisplayMedia)
+                console.log('🌐 Using web audio capture')
+                await connect(useSystemAudio, selectedMicId)
+            }
         } catch (e: any) {
             setError(e.message)
         }
@@ -847,6 +859,14 @@ export default function InterviewSessionPage() {
                                     <br />3. Click "Share"
                                 </p>
                             </div>
+
+                            {/* Electron-Specific: Audio Source Selector */}
+                            {typeof window !== 'undefined' && window.electron && useSystemAudio && !isRecording && (
+                                <AudioSourceSelector
+                                    onSourceSelected={setSelectedElectronSource}
+                                    selectedSourceId={selectedElectronSource}
+                                />
+                            )}
 
                             <div style={{ padding: '8px', background: 'rgba(234, 179, 8, 0.1)', borderRadius: '6px', border: '1px solid rgba(234, 179, 8, 0.2)' }}>
                                 <p style={{ fontSize: '11px', color: '#fbbf24' }}>
