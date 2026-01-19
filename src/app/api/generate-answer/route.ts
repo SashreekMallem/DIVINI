@@ -95,52 +95,74 @@ CASE/PRODUCT (2-3 min, ~350 words):
 
 YOUR ANSWER (start speaking immediately, no intro phrases):`
 
-    const result = await model.generateContent(prompt)
-    const response = await result.response
-    let answer = response.text()
+    const result = await model.generateContentStream(prompt)
 
-    // Get ACTUAL token usage from Gemini response (not estimates)
-    const usageMetadata = response.usageMetadata
-    const inputTokens = usageMetadata?.promptTokenCount || 0
-    const outputTokens = usageMetadata?.candidatesTokenCount || 0
+    // Create a streaming response
+    const stream = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder()
 
-    // Clean up common meta-commentary patterns
-    const metaPatterns = [
-      /^okay,?\s*(here'?s|this is|let me|designing)/i,
-      /^so,?\s*(here'?s|let me|i would)/i,
-      /^let me\s+(tell you|explain|share)/i,
-      /^i would\s+(say|tell|explain)/i,
-      /^here'?s\s+(my|the)\s+answer/i,
-      /^this is\s+(a|an)\s+(case|product|technical)/i,
-      // Remove question type mentions
-      /^(this is|it'?s|that'?s)\s+(a|an)\s+(quick|intro|behavioral|technical|case|product)\s+question[.,]?\s*/i,
-      /^(a|an)\s+(quick|intro|behavioral|technical|case|product)\s+question[.,]?\s*(so\s+)?(i\s+will\s+aim\s+for|i'll\s+aim\s+for|targeting)\s*[~]?\d+\s*words?[.,]?\s*/i,
-      // Remove word count mentions
-      /^(i'?ll|i\s+will)\s+(aim\s+for|target|generate)\s*[~]?\d+\s*words?[.,]?\s*/i,
-      /^targeting\s*[~]?\d+\s*words?[.,]?\s*/i,
-    ]
+        try {
+          let accumulatedAnswer = ''
+          let inputTokens = 0
 
-    for (const pattern of metaPatterns) {
-      answer = answer.replace(pattern, '').trim()
-    }
+          for await (const chunk of result.stream) {
+            const chunkText = chunk.text()
+            accumulatedAnswer += chunkText
 
-    // Remove any leading quotes, colons, or asterisks
-    answer = answer.replace(/^["':*•\-\s]+/, '').trim()
+            if (chunkText) {
+              controller.enqueue(encoder.encode(JSON.stringify({ text: chunkText }) + '\n'))
+            }
 
-    // Remove standalone "Okay," at the start
-    answer = answer.replace(/^okay,?\s+/i, '').trim()
+            if (chunk.usageMetadata) {
+              inputTokens = chunk.usageMetadata.promptTokenCount || 0
+            }
+          }
 
-    // Gemini 2.0 Flash OFFICIAL pricing (per 1M tokens):
-    // Input: $0.10/1M = $0.0000001/token = 0.00001 cents/token
-    // Output: $0.40/1M = $0.0000004/token = 0.00004 cents/token
-    const costCents = (inputTokens * 0.00001) + (outputTokens * 0.00004)
+          const metaPatterns = [
+            /^okay,?\s*(here'?s|this is|let me|designing)/i,
+            /^so,?\s*(here'?s|let me|i would)/i,
+            /^let me\s+(tell you|explain|share)/i,
+            /^i would\s+(say|tell|explain)/i,
+            /^here'?s\s+(my|the)\s+answer/i,
+            /^this is\s+(a|an)\s+(case|product|technical)/i,
+            /^(this is|it'?s|that'?s)\s+(a|an)\s+(quick|intro|behavioral|technical|case|product)\s+question[.,]?\s*/i,
+            /^(a|an)\s+(quick|intro|behavioral|technical|case|product)\s+question[.,]?\s*(so\s+)?(i\s+will\s+aim\s+for|i'll\s+aim\s+for|targeting)\s*[~]?\d+\s*words?[.,]?\s*/i,
+            /^(i'?ll|i\s+will)\s+(aim\s+for|target|generate)\s*[~]?\d+\s*words?[.,]?\s*/i,
+            /^targeting\s*[~]?\d+\s*words?[.,]?\s*/i,
+          ]
 
-    return NextResponse.json({
-      answer,
-      usage: {
-        inputTokens,
-        outputTokens,
-        costCents: Math.round(costCents * 1000) / 1000 // Round to 3 decimal places
+          let cleanAnswer = accumulatedAnswer
+          for (const pattern of metaPatterns) {
+            cleanAnswer = cleanAnswer.replace(pattern, '').trim()
+          }
+          cleanAnswer = cleanAnswer.replace(/^["':*•\-\s]+/, '').trim()
+          cleanAnswer = cleanAnswer.replace(/^okay,?\s+/i, '').trim()
+
+          const outputTokens = Math.ceil(cleanAnswer.length / 4)
+          const costCents = (inputTokens * 0.00001) + (outputTokens * 0.00004)
+
+          controller.enqueue(encoder.encode(JSON.stringify({
+            done: true,
+            fullText: cleanAnswer,
+            usage: {
+              inputTokens,
+              outputTokens,
+              costCents: Math.round(costCents * 1000) / 1000
+            }
+          }) + '\n'))
+
+          controller.close()
+        } catch (error) {
+          controller.error(error)
+        }
+      }
+    })
+
+    return new NextResponse(stream, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Transfer-Encoding': 'chunked'
       }
     })
 
