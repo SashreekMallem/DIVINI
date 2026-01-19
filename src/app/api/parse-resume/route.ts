@@ -1,4 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
+
+// Polyfill DOMMatrix for PDF.js compatibility in Node.js/Serverless
+if (typeof (global as any).DOMMatrix === 'undefined') {
+    (global as any).DOMMatrix = class DOMMatrix {
+        constructor() { }
+        toString() { return "matrix(1, 0, 0, 1, 0, 0)"; }
+    }
+}
+
 const pdfParse = require('pdf-parse')
 import mammoth from 'mammoth'
 
@@ -67,7 +76,8 @@ export async function POST(request: NextRequest) {
 export async function GET() {
     return NextResponse.json({
         status: 'ok',
-        message: 'PDF Parser Diagnostic',
-        version: '1.1.1-pinned'
+        message: 'PDF Parser Diagnostic (Polyfilled)',
+        version: '1.1.1-pinned',
+        deployedAt: '2026-01-19T10:15:00Z'
     })
 }
