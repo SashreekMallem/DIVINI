@@ -215,23 +215,41 @@ export function AudioSettingsPanel({
                 {useSystemAudio && browserInfo.supportsTabAudio && (
                     <div style={{
                         marginTop: '12px',
-                        padding: '10px',
+                        padding: '12px',
                         background: 'rgba(24, 24, 27, 0.8)',
-                        borderRadius: '8px',
+                        borderRadius: '10px',
+                        border: '1px solid rgba(255,255,255,0.05)',
                         fontSize: '11px',
                         color: '#d4d4d8'
                     }}>
-                        <div style={{ display: 'flex', alignItems: 'start', gap: '6px', marginBottom: '6px' }}>
-                            <Info style={{ width: '14px', height: '14px', color: '#818cf8', flexShrink: 0, marginTop: '1px' }} />
-                            <strong style={{ color: 'white' }}>When you click Start:</strong>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+                            <div style={{ padding: '4px', background: 'rgba(99, 102, 241, 0.2)', borderRadius: '6px' }}>
+                                <Chrome style={{ width: '14px', height: '14px', color: '#818cf8' }} />
+                            </div>
+                            <strong style={{ color: 'white', fontSize: '12px' }}>Browser Selection Guide</strong>
                         </div>
-                        <ol style={{ margin: 0, paddingLeft: '20px', lineHeight: '1.6' }}>
-                            <li>Browser will show a "Share your screen" dialog</li>
-                            <li>Click the <strong>"Browser Tab"</strong> option</li>
-                            <li>Select the tab with your interview (Meet/Zoom/Teams)</li>
-                            <li>✅ Check <strong>"Share tab audio"</strong> checkbox</li>
-                            <li>Click <strong>"Share"</strong></li>
-                        </ol>
+
+                        <div style={{ display: 'grid', gap: '8px' }}>
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '8px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
+                                <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#3f3f46', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 'bold' }}>1</div>
+                                <span>Click <strong>"Browser Tab"</strong> at the top</span>
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '8px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
+                                <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#3f3f46', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 'bold' }}>2</div>
+                                <span>Select your <strong>Interview Tab</strong> (Zoom/Meet)</span>
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '8px', background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.2)', borderRadius: '6px' }}>
+                                <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#22c55e', color: 'black', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 'bold' }}>3</div>
+                                <span style={{ color: '#86efac', fontWeight: 600 }}>Toggle "Share tab audio" on</span>
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', padding: '8px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
+                                <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#3f3f46', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: 'bold' }}>4</div>
+                                <span>Click <strong>"Share"</strong></span>
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>

@@ -179,33 +179,36 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
 
             // 2. Get screen share (optional - still in gesture context!)
             if (useSystemAudio) {
-                console.log('🔊 Requesting screen share...')
-                console.log('   → Browser picker will open')
-                console.log('   → Select the TAB with your interview (Meet/Zoom/Teams)')
-                console.log('   → Check "Share tab audio" ✓')
+                console.log('🔊 Requesting screen share for system audio...')
+                console.log('IMPORTANT INSTRUCTIONS:')
+                console.log('1. Select "Browser Tab" (not Window/Screen)')
+                console.log('2. Pick the tab where the interview is happening')
+                console.log('3. CHECK "Share tab audio" (Crucial!)')
 
                 try {
                     displayStream = await navigator.mediaDevices.getDisplayMedia({
-                        video: { width: 1, height: 1, frameRate: 1 },
+                        video: { width: 1, height: 1, frameRate: 1 }, // Minimal video to satisfy API
                         audio: {
                             echoCancellation: false,
                             noiseSuppression: false,
                             autoGainControl: false,
-                            // @ts-ignore - Chrome-specific: suggests system audio option
+                            // @ts-ignore - Chrome hint
                             systemAudio: 'include',
                         },
-                        // @ts-ignore - Chrome-specific constraints for better UX
-                        preferCurrentTab: false, // Show all tabs (user picks their Meet/Zoom tab)
-                        surfaceSwitching: 'include', // Allow switching tabs during interview
-                        selfBrowserSurface: 'exclude', // Don't allow sharing this tab (avoids mirrors)
+                        // @ts-ignore - Chrome constraints
+                        preferCurrentTab: false, // We want them to pick the OTHER tab (Zoom/Meet), not this one
+                        surfaceSwitching: 'include',
+                        selfBrowserSurface: 'exclude',
+                        monitorTypeSurfaces: 'exclude' // Don't show screens, only tabs/windows ideally
                     })
                 } catch (e: any) {
                     if (e.name === 'NotAllowedError') {
-                        console.warn('⚠️ Screen share cancelled')
-                        onError('Screen share cancelled. Running in microphone-only mode.')
+                        console.warn('⚠️ Screen share cancelled by user')
+                        // Don't error out, just fall back to mic-only but warn
+                        onError('System audio cancelled. Using microphone only.')
                     } else {
-                        console.error('❌ Screen share failed:', e.message)
-                        onError(`Screen share failed: ${e.message}`)
+                        console.error('❌ Screen share error:', e)
+                        onError(`System audio error: ${e.message}`)
                     }
                     displayStream = null
                 }
@@ -225,27 +228,37 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
             if (displayStream) {
                 const audioTracks = displayStream.getAudioTracks()
 
-                // Stop video track (don't need it)
+                // Stop video track immediately (saves bandwidth/cpu)
                 displayStream.getVideoTracks().forEach(t => t.stop())
 
                 if (audioTracks.length === 0) {
-                    console.warn('⚠️ No audio! Did you check "Share tab audio"?')
-                    onError('No audio captured. Make sure to check "Share tab audio".')
+                    // CRITICAL ERROR: User picked a source but didn't share audio
+                    console.error('❌ No system audio track found!')
+                    console.error('👉 Did you forget to check "Share tab audio"?')
+                    onError('NO SYSTEM AUDIO DETECTED. Please restart and check "Share tab audio" in the popup.')
+
+                    // Stop the stream since it's useless
+                    displayStream.getTracks().forEach(t => t.stop())
                 } else {
-                    console.log('🔌 Connecting system audio to Deepgram...')
-                    const sysSocket = await createDeepgramSocket('Interviewer')
-                    sysSocketRef.current = sysSocket
+                    console.log('🔌 Connecting system audio to Deepgram (Interviewer channel)...')
+                    try {
+                        const sysSocket = await createDeepgramSocket('Interviewer')
+                        sysSocketRef.current = sysSocket
 
-                    const audioOnlyStream = new MediaStream(audioTracks)
-                    sysStreamRef.current = audioOnlyStream
+                        const audioOnlyStream = new MediaStream(audioTracks)
+                        sysStreamRef.current = audioOnlyStream
 
-                    setupAudioPipeline(audioOnlyStream, sysSocket, sysContextRef)
-                    console.log('✅ System audio ready (Interviewer)')
+                        setupAudioPipeline(audioOnlyStream, sysSocket, sysContextRef)
+                        console.log('✅ System audio connected & processing')
 
-                    // Handle user stopping share
-                    audioTracks[0].onended = () => {
-                        console.log('🛑 Share stopped')
-                        sysSocketRef.current?.close()
+                        // Handle user stopping share
+                        audioTracks[0].onended = () => {
+                            console.log('🛑 User stopped sharing system audio')
+                            sysSocketRef.current?.close()
+                            onError('System audio sharing stopped.')
+                        }
+                    } catch (e) {
+                        console.error('❌ Failed to connect system audio socket:', e)
                     }
                 }
             }
