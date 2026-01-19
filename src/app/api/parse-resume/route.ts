@@ -63,3 +63,11 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: error.message || 'Server failed to parse file' }, { status: 500 })
     }
 }
+
+export async function GET() {
+    return NextResponse.json({
+        status: 'ok',
+        message: 'PDF Parser Diagnostic',
+        version: '1.1.1-pinned'
+    })
+}
