@@ -2,6 +2,9 @@
 
 # dependencies
 /node_modules
+/node_modules_backup_*
+/node_modules.nosync
+/dist-electron
 /.pnp
 .pnp.*
 .yarn/*

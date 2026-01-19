@@ -34,6 +34,8 @@ import {
     type MultiRoundMemory
 } from '@/lib/utils/smartContextManager'
 import { useDeepgram } from '@/lib/hooks/useDeepgram'
+import { StealthModeGuide } from '@/components/StealthModeGuide'
+import { Check } from 'lucide-react'
 
 interface CoachingEntry {
     id: string
@@ -80,6 +82,11 @@ export default function InterviewSessionPage() {
     const [sessionMemory, setSessionMemory] = useState<SessionMemory | null>(null)
     const [multiRoundMemory, setMultiRoundMemory] = useState<MultiRoundMemory | null>(null)
 
+    // Stealth Mode State
+    const [showStealthGuide, setShowStealthGuide] = useState(false)
+    const [platform, setPlatform] = useState<string>('')
+    const [isElectron, setIsElectron] = useState(false)
+
     // Audio Settings
     const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([])
     const [selectedMicId, setSelectedMicId] = useState<string>('')
@@ -115,9 +122,41 @@ export default function InterviewSessionPage() {
         getDevices()
 
         // Initialize Stealth Mode Manager
-        screenShareManager.init((isStealth) => {
-            setIsStealthMode(isStealth)
-        })
+        if (typeof window !== 'undefined' && (window as any).electron) {
+            const electron = (window as any).electron
+            setIsElectron(true)
+            setPlatform(electron.platform)
+        }
+
+        screenShareManager.init(
+            (isStealth) => {
+                setIsStealthMode(isStealth)
+                // If it's macOS/Linux and stealth is triggered, show the guide once
+                if (isStealth && (window as any).electron?.platform !== 'win32') {
+                    // Note: In auto-hide mode, the guide should be shown before capture
+                    // But for first-time use, we show it on toggle if needed
+                }
+            },
+            () => {
+                // onSaveState: return the data to be persisted
+                return {
+                    transcriptSegments,
+                    coaching,
+                    elapsedTime,
+                    partialTranscript,
+                    timestamp: Date.now()
+                }
+            },
+            (saved) => {
+                // onRestoreState: apply the persisted data
+                if (saved) {
+                    if (saved.transcriptSegments) setTranscriptSegments(saved.transcriptSegments)
+                    if (saved.coaching) setCoaching(saved.coaching)
+                    if (saved.elapsedTime) setElapsedTime(saved.elapsedTime)
+                    if (saved.partialTranscript) setPartialTranscript(saved.partialTranscript)
+                }
+            }
+        )
 
         return () => {
             cleanup()
@@ -545,6 +584,23 @@ export default function InterviewSessionPage() {
         }
     }
 
+    const toggleStealthMode = async () => {
+        const nextState = !isStealthMode
+        const result = await screenShareManager.setStealth(nextState)
+
+        if (result.success) {
+            setIsStealthMode(nextState)
+
+            // If enabling on macOS/Linux, show the guide
+            if (nextState && result.showGuide) {
+                setShowStealthGuide(true)
+            }
+        } else if (result.showGuide) {
+            // For macOS, even if protection fails, we show the guide for the workaround
+            setShowStealthGuide(true)
+        }
+    }
+
     // Effect to start streaming once connected
     useEffect(() => {
         if (connectionStatus === 'connected' && !isRecording) {
@@ -703,6 +759,28 @@ export default function InterviewSessionPage() {
                     <button onClick={() => setShowContext(!showContext)} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: showContext ? 'rgba(99, 102, 241, 0.2)' : 'rgba(39, 39, 42, 0.8)', border: showContext ? '1px solid rgba(99, 102, 241, 0.3)' : '1px solid transparent', borderRadius: '10px', color: showContext ? '#6366f1' : '#a1a1aa', fontSize: '13px', cursor: 'pointer' }}>
                         <FileText style={{ width: '14px', height: '14px' }} /> Context
                     </button>
+
+                    {/* Stealth Mode Toggle (Electron Only) */}
+                    {isElectron && (
+                        <button
+                            onClick={toggleStealthMode}
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '8px 14px',
+                                background: isStealthMode ? 'rgba(239, 68, 68, 0.1)' : 'rgba(39, 39, 42, 0.8)',
+                                border: '1px solid transparent',
+                                borderRadius: '10px',
+                                color: isStealthMode ? '#ef4444' : '#a1a1aa',
+                                fontSize: '13px',
+                                cursor: 'pointer'
+                            }}
+                        >
+                            <EyeOff style={{ width: '14px', height: '14px' }} />
+                            Stealth: {isStealthMode ? 'ON' : 'OFF'}
+                        </button>
+                    )}
 
                     {/* Audio Settings Panel (Absolute) */}
                     {showAudioSettings && (
@@ -933,6 +1011,13 @@ export default function InterviewSessionPage() {
                     </div>
                 </div>
             </div>
+
+            {/* Stealth Mode Guide Modal */}
+            <StealthModeGuide
+                isOpen={showStealthGuide}
+                onClose={() => setShowStealthGuide(false)}
+                platform={platform}
+            />
         </div>
     )
 }
