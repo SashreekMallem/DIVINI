@@ -445,6 +445,16 @@ export default function InterviewSessionPage() {
             }
             abortControllerRef.current = new AbortController()
 
+            // Optimistic UI: Create placeholder entry immediately
+            const pendingEntryId = Date.now().toString()
+            setCoaching(prev => [...prev, {
+                id: pendingEntryId,
+                questionId: questionId || '',
+                question,
+                answer: '',
+                timestamp: new Date(),
+            }])
+
             const response = await fetch('/api/generate-answer', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -456,44 +466,70 @@ export default function InterviewSessionPage() {
                 const errorData = await response.json().catch(() => ({}))
                 throw new Error(errorData.error || 'Failed to generate answer')
             }
-            const data = await response.json()
 
-            console.log('✅ Answer received from Gemini:', {
-                answerLength: data.answer?.length || 0,
-                questionId: questionId || 'missing',
-                usage: data.usage
-            })
+            if (!response.body) throw new Error('No response body')
 
-            // Track API usage for billing
-            if (data.usage && userId.current) {
-                supabase.from('api_usage').insert({
-                    user_id: userId.current,
-                    api_type: 'gemini_answer',
-                    input_tokens: data.usage.inputTokens || 0,
-                    output_tokens: data.usage.outputTokens || 0,
-                    cost_cents: data.usage.costCents || 0,
-                    interview_id: params.id as string
-                }).then(() => console.log('📊 Usage tracked'))
+            // STREAM READER LOOP
+            const reader = response.body.getReader()
+            const decoder = new TextDecoder()
+            let accumulatedAnswer = ''
+            let done = false
+
+            while (!done) {
+                const { value, done: doneReading } = await reader.read()
+                done = doneReading
+
+                if (value) {
+                    const chunkText = decoder.decode(value, { stream: true })
+                    // Split by newlines as backend sends JSON lines
+                    const lines = chunkText.split('\n').filter(line => line.trim() !== '')
+
+                    for (const line of lines) {
+                        try {
+                            const data = JSON.parse(line)
+
+                            if (data.text) {
+                                accumulatedAnswer += data.text
+                                // Update UI incrementally
+                                setCoaching(prev => prev.map(c =>
+                                    c.id === pendingEntryId
+                                        ? { ...c, answer: c.answer + data.text }
+                                        : c
+                                ))
+                                // Auto-scroll to bottom of answer
+                                coachingRef.current?.scrollTo({ top: coachingRef.current.scrollHeight, behavior: 'smooth' })
+                            }
+
+                            if (data.usage) {
+                                console.log('✅ Stream complete. Usage:', data.usage)
+                                // Track API usage for billing
+                                if (data.usage && userId.current) {
+                                    supabase.from('api_usage').insert({
+                                        user_id: userId.current,
+                                        api_type: 'gemini_answer',
+                                        input_tokens: data.usage.inputTokens || 0,
+                                        output_tokens: data.usage.outputTokens || 0,
+                                        cost_cents: data.usage.costCents || 0,
+                                        interview_id: params.id as string
+                                    }).then(() => console.log('📊 Usage tracked'))
+                                }
+
+                                // Save final FULL generated answer to DB
+                                // Use the clean "fullText" if provided by backend, otherwise accumulated
+                                const finalAnswer = data.fullText || accumulatedAnswer
+                                if (questionId && finalAnswer) {
+                                    await saveGeneratedAnswer(questionId, finalAnswer)
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('Error parsing stream chunk:', e)
+                        }
+                    }
+                }
             }
 
-            // Save generated answer to DB
-            if (questionId && data.answer) {
-                await saveGeneratedAnswer(questionId, data.answer)
-            } else {
-                console.warn('⚠️ Skipping save - questionId or answer missing:', { questionId, hasAnswer: !!data.answer })
-            }
+            console.log('✅ Answer streaming complete.')
 
-            setCoaching(prev => [...prev, {
-                id: Date.now().toString(),
-                questionId: questionId || '',
-                question,
-                answer: data.answer,
-                timestamp: new Date(),
-            }])
-
-            setTimeout(() => {
-                coachingRef.current?.scrollTo({ top: coachingRef.current.scrollHeight, behavior: 'smooth' })
-            }, 100)
         } catch (err: any) {
             // Don't log abort errors - they're intentional from cancel/restart pattern
             if (err?.name === 'AbortError') {
@@ -501,6 +537,15 @@ export default function InterviewSessionPage() {
                 return // Exit silently, new request is in progress
             }
             console.error('Error generating answer:', err)
+
+            // Update UI to show error state if needed
+            setCoaching(prev => prev.map(c =>
+                c.id === undefined // We don't have pendingEntryId access here easily without ref or finding last
+                    && c.question === question
+                    && c.answer === ''
+                    ? { ...c, answer: '⚠️ Error generating answer based on context.' }
+                    : c
+            ))
         } finally {
             setIsGenerating(false)
         }

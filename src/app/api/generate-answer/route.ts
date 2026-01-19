@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
 
     // Build context
     let contextBlock: string
-    
+
     if (smartContext && smartContext.trim()) {
       contextBlock = smartContext
     } else {
@@ -98,12 +98,12 @@ YOUR ANSWER (start speaking immediately, no intro phrases):`
     const result = await model.generateContent(prompt)
     const response = await result.response
     let answer = response.text()
-    
+
     // Get ACTUAL token usage from Gemini response (not estimates)
     const usageMetadata = response.usageMetadata
     const inputTokens = usageMetadata?.promptTokenCount || 0
     const outputTokens = usageMetadata?.candidatesTokenCount || 0
-    
+
     // Clean up common meta-commentary patterns
     const metaPatterns = [
       /^okay,?\s*(here'?s|this is|let me|designing)/i,
@@ -119,14 +119,14 @@ YOUR ANSWER (start speaking immediately, no intro phrases):`
       /^(i'?ll|i\s+will)\s+(aim\s+for|target|generate)\s*[~]?\d+\s*words?[.,]?\s*/i,
       /^targeting\s*[~]?\d+\s*words?[.,]?\s*/i,
     ]
-    
+
     for (const pattern of metaPatterns) {
       answer = answer.replace(pattern, '').trim()
     }
-    
+
     // Remove any leading quotes, colons, or asterisks
     answer = answer.replace(/^["':*•\-\s]+/, '').trim()
-    
+
     // Remove standalone "Okay," at the start
     answer = answer.replace(/^okay,?\s+/i, '').trim()
 
@@ -135,7 +135,7 @@ YOUR ANSWER (start speaking immediately, no intro phrases):`
     // Output: $0.40/1M = $0.0000004/token = 0.00004 cents/token
     const costCents = (inputTokens * 0.00001) + (outputTokens * 0.00004)
 
-    return NextResponse.json({ 
+    return NextResponse.json({
       answer,
       usage: {
         inputTokens,
