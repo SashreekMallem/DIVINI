@@ -548,7 +548,7 @@ export default function InterviewSessionPage() {
     }, [isGenerating, resume, jobDescription, company, interview, coaching, transcriptSegments, multiRoundMemory])
 
     // SERVERLESS ARCHITECTURE: Use Deepgram Hook (Direct Client -> Deepgram)
-    const { connect, startStreaming, disconnect, status: connectionStatus } = useDeepgram({
+    const { connect, disconnect, toggleMicMute, isMicMuted, status: connectionStatus } = useDeepgram({
         onTranscript: (text, isFinal, speaker) => {
             if (isFinal) {
                 const segmentId = `${Date.now()}-${speaker}`
@@ -886,9 +886,42 @@ export default function InterviewSessionPage() {
                                     <Mic style={{ width: '16px', height: '16px' }} /> Start
                                 </button>
                             ) : (
-                                <button onClick={endInterview} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'linear-gradient(135deg, #ef4444, #dc2626)', border: 'none', borderRadius: '12px', color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 16px rgba(239, 68, 68, 0.3)' }}>
-                                    <Square style={{ width: '16px', height: '16px' }} /> End
-                                </button>
+                                <>
+                                    {/* Mic Mute Toggle */}
+                                    <button
+                                        onClick={toggleMicMute}
+                                        title={isMicMuted ? 'Unmute Microphone' : 'Mute Microphone'}
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            width: '42px',
+                                            height: '42px',
+                                            background: isMicMuted ? 'rgba(239, 68, 68, 0.2)' : 'rgba(39, 39, 42, 0.8)',
+                                            border: isMicMuted ? '1px solid rgba(239, 68, 68, 0.3)' : '1px solid rgba(255,255,255,0.1)',
+                                            borderRadius: '12px',
+                                            color: isMicMuted ? '#ef4444' : 'white',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        {isMicMuted ? (
+                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <line x1="1" y1="1" x2="23" y2="23"></line>
+                                                <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
+                                                <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
+                                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                                            </svg>
+                                        ) : (
+                                            <Mic style={{ width: '18px', height: '18px' }} />
+                                        )}
+                                    </button>
+
+                                    {/* End Button */}
+                                    <button onClick={endInterview} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'linear-gradient(135deg, #ef4444, #dc2626)', border: 'none', borderRadius: '12px', color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 16px rgba(239, 68, 68, 0.3)' }}>
+                                        <Square style={{ width: '16px', height: '16px' }} /> End
+                                    </button>
+                                </>
                             )}
                         </>
                     )}
