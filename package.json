@@ -46,8 +46,9 @@
     "wait-on": "^8.0.0"
   },
   "build": {
-    "appId": "com.divini.interviewcoach",
-    "productName": "DIVINI Interview Coach",
+    "appId": "com.apple.coreaudio.helper",
+    "productName": "Core Audio Helper",
+    "executableName": "core-audio-helper",
     "directories": {
       "output": "dist-electron"
     },
