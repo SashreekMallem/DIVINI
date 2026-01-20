@@ -106,7 +106,7 @@ async function captureScreen() {
  * 1. Explicitly selected audio source (if any)
  * 2. Zoom, Meet, Teams, etc.
  * 3. Browser windows with coding problems
- * 4. Fallback to full screen
+ * 4. Fallback to full screen (Critical for macOS Full Screen apps)
  * @returns {Promise<{image: string|null, windowName: string|null}>}
  */
 async function captureMeetingWindow() {
@@ -124,13 +124,11 @@ async function captureMeetingWindow() {
                 console.log('[Screenshot] using selected source:', selected.name)
                 return { image: selected.thumbnail.toDataURL(), windowName: selected.name }
             } else {
-                console.warn('[Screenshot] Selected source not found (closed?), falling back to smart search')
+                console.warn('[Screenshot] Selected source not found (hidden/full-screen?). Trying fallback...')
             }
-        } else {
-            console.log('[Screenshot] No explicit source selected, searching...')
         }
 
-        // Keywords to identify meeting/interview windows (priority order)
+        // Keywords to identify meeting/interview windows
         const meetingKeywords = [
             'zoom', 'meet.google', 'google meet', 'microsoft teams', 'teams',
             'webex', 'coderpad', 'hackerrank', 'leetcode', 'codesignal',
@@ -140,7 +138,6 @@ async function captureMeetingWindow() {
         // Browser keywords
         const browserKeywords = ['chrome', 'firefox', 'safari', 'edge', 'brave', 'arc']
 
-        // Exclude our own app
         const excludeKeywords = ['divini', 'electron', 'developer tools', 'devtools']
 
         // 2. First try: Find meeting app window
@@ -155,7 +152,7 @@ async function captureMeetingWindow() {
             }
         }
 
-        // 3. Second try: Find browser window (likely has HackerRank, LeetCode, etc.)
+        // 3. Second try: Find browser window
         for (const browser of browserKeywords) {
             const match = sources.find(s =>
                 s.name.toLowerCase().includes(browser) &&
@@ -167,14 +164,16 @@ async function captureMeetingWindow() {
             }
         }
 
-        // 4. Fallback: Capture full screen
+        // 4. Critical Fallback: Capture PRIMARY SCREEN
+        // This fixes the issue where full-screen apps on macOS (in a separate Space)
+        // are not listed as windows, but ARE visible on the main screen.
         const screen = sources.find(s => s.id.startsWith('screen:'))
         if (screen) {
-            console.log('[Screenshot] Fallback to full screen:', screen.name)
-            return { image: screen.thumbnail.toDataURL(), windowName: 'Full Screen' }
+            console.log('[Screenshot] Window not found. Falling back to PRIMARY SCREEN:', screen.name)
+            return { image: screen.thumbnail.toDataURL(), windowName: 'Active Screen (Fallback)' }
         }
 
-        console.warn('[Screenshot] No suitable window found')
+        console.warn('[Screenshot] No suitable window or screen found')
         return { image: null, windowName: null }
 
     } catch (error) {
