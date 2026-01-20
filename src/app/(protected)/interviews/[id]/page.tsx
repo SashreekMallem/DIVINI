@@ -20,7 +20,8 @@ import {
     Building2,
     RefreshCw,
     Settings,
-    Monitor
+    Monitor,
+    Camera
 } from 'lucide-react'
 import type { Interview, Resume, JobDescription, Company } from '@/types/database'
 import { screenShareManager } from '@/lib/utils/screenShareManager'
@@ -37,6 +38,7 @@ import { useDeepgram } from '@/lib/hooks/useDeepgram'
 import { Check } from 'lucide-react'
 import { AudioSourceSelector } from '@/components/AudioSourceSelector'
 import { AudioSettingsPanel } from '@/components/AudioSettingsPanel'
+import { CodingSolutionPanel } from '@/components/CodingSolutionPanel'
 
 interface CoachingEntry {
     id: string
@@ -99,6 +101,12 @@ export default function InterviewSessionPage() {
     const [webDisplayStream, setWebDisplayStream] = useState<MediaStream | null>(null)
     const [connectedTabName, setConnectedTabName] = useState<string | null>(null)
     const [isConnectingTab, setIsConnectingTab] = useState(false)
+
+    // Coding Question Capture State
+    const [capturedScreenshot, setCapturedScreenshot] = useState<string | null>(null)
+    const [codingSolution, setCodingSolution] = useState<any>(null)
+    const [isSolvingCode, setIsSolvingCode] = useState(false)
+    const [codingError, setCodingError] = useState<string | null>(null)
 
     const socketRef = useRef<WebSocket | null>(null)
     const timerRef = useRef<NodeJS.Timeout | null>(null)
@@ -695,6 +703,158 @@ export default function InterviewSessionPage() {
         }
     }, [])
 
+    // === CODING QUESTION CAPTURE ===
+    const handleCaptureCode = useCallback(async () => {
+        const electron = typeof window !== 'undefined' ? (window as any).electron : null
+        if (!electron?.capture) {
+            setCodingError('Coding capture requires the Electron app')
+            return
+        }
+
+        try {
+            setIsSolvingCode(true)
+            setCodingError(null)
+            setCodingSolution(null)
+
+            // 1. Smart capture: Auto-detect meeting/browser window
+            console.log('📸 Smart capturing coding problem...')
+            const captureResult = await electron.capture.smart()
+
+            if (!captureResult.success || !captureResult.image) {
+                throw new Error('Failed to capture screen. Make sure a browser or meeting app is visible.')
+            }
+
+            console.log('📸 Captured window:', captureResult.windowName || 'Unknown')
+            const screenshot = captureResult.image
+            setCapturedScreenshot(screenshot)
+
+            console.log('🧠 Phase 1: Analyzing problem...')
+
+            // 2. Phase 1: Analyze the problem
+            const phase1Response = await fetch('/api/solve-code', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image: screenshot,
+                    context: {
+                        resume: resume?.content,
+                        jobDescription: jobDescription?.content,
+                        transcript: transcriptSegments.slice(-5).map(s => `${s.speaker}: ${s.text}`)
+                    },
+                    phase: 'analyze'
+                })
+            })
+
+            if (!phase1Response.ok) {
+                throw new Error('Failed to analyze problem')
+            }
+
+            const phase1Data = await phase1Response.json()
+            console.log('✅ Phase 1 complete:', phase1Data.result)
+
+            console.log('🧠 Phase 2: Generating solution...')
+
+            // 3. Phase 2: Generate full solution
+            const phase2Response = await fetch('/api/solve-code', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image: screenshot,
+                    context: {
+                        resume: resume?.content,
+                        jobDescription: jobDescription?.content,
+                        transcript: transcriptSegments.slice(-5).map(s => `${s.speaker}: ${s.text}`)
+                    },
+                    phase: 'solve',
+                    analysisResult: phase1Data.result
+                })
+            })
+
+            if (!phase2Response.ok) {
+                throw new Error('Failed to generate solution')
+            }
+
+            const phase2Data = await phase2Response.json()
+            console.log('✅ Phase 2 complete:', phase2Data.result)
+
+            setCodingSolution(phase2Data.result)
+
+            // Save coding solution to database (create question first, then answer)
+            try {
+                // 1. Create a question entry for the coding problem
+                const { data: questionData, error: questionError } = await supabase
+                    .from('questions')
+                    .insert({
+                        interview_id: params?.id as string,
+                        user_id: userId.current,
+                        text: phase1Data.result.problem || 'Coding Problem',
+                        question_type: 'technical',
+                        question_category: 'coding',
+                        difficulty_estimate: 'medium',
+                    })
+                    .select('id')
+                    .single()
+
+                if (questionError) {
+                    console.error('Failed to save coding question:', questionError)
+                } else if (questionData) {
+                    // 2. Save the coding solution linked to the question
+                    const { error: answerError } = await supabase.from('generated_answers').insert({
+                        interview_id: params?.id as string,
+                        user_id: userId.current,
+                        question_id: questionData.id,
+                        answer_text: JSON.stringify({
+                            type: 'coding_solution',
+                            problem: phase1Data.result.problem,
+                            ...phase2Data.result
+                        }),
+                        model_used: 'gemini-3-pro-preview',
+                    })
+
+                    if (answerError) {
+                        console.error('Failed to save coding answer:', answerError)
+                    } else {
+                        console.log('💾 Coding solution saved to database')
+                    }
+                }
+            } catch (saveError) {
+                console.error('Failed to save coding solution:', saveError)
+            }
+
+            console.log('🎉 Coding solution ready!')
+
+        } catch (e: any) {
+            console.error('❌ Coding capture failed:', e)
+            setCodingError(e.message || 'Failed to solve coding problem')
+        } finally {
+            setIsSolvingCode(false)
+        }
+    }, [resume, jobDescription, transcriptSegments])
+
+    // Listen for global hotkey from Electron main process
+    useEffect(() => {
+        const electron = typeof window !== 'undefined' ? (window as any).electron : null
+        if (electron?.capture?.onHotkey) {
+            console.log('🎹 Registering coding capture hotkey listener')
+            electron.capture.onHotkey(() => {
+                console.log('🎹 Hotkey triggered! Capturing...')
+                handleCaptureCode()
+            })
+
+            return () => {
+                electron.capture.removeHotkeyListener?.()
+            }
+        }
+    }, [handleCaptureCode])
+
+    // Sync selected audio source with screenshot capture module
+    useEffect(() => {
+        const electron = typeof window !== 'undefined' ? (window as any).electron : null
+        if (electron?.capture?.setSource && selectedElectronSource) {
+            electron.capture.setSource(selectedElectronSource)
+        }
+    }, [selectedElectronSource])
+
     const toggleStealthMode = async () => {
         const nextState = !isStealthMode
         const result = await screenShareManager.setStealth(nextState)
@@ -890,6 +1050,34 @@ export default function InterviewSessionPage() {
                         </button>
                     )}
 
+                    {/* Coding Capture Button (Electron only) */}
+                    {isElectron && (
+                        <button
+                            onClick={handleCaptureCode}
+                            disabled={isSolvingCode}
+                            title="Capture coding problem (Cmd/Ctrl+Shift+C)"
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '8px 14px',
+                                background: isSolvingCode ? 'rgba(34, 197, 94, 0.2)' : 'rgba(39, 39, 42, 0.8)',
+                                border: '1px solid transparent',
+                                borderRadius: '10px',
+                                color: isSolvingCode ? '#22c55e' : '#a1a1aa',
+                                fontSize: '13px',
+                                cursor: isSolvingCode ? 'wait' : 'pointer'
+                            }}
+                        >
+                            {isSolvingCode ? (
+                                <Loader2 style={{ width: '14px', height: '14px', animation: 'spin 1s linear infinite' }} />
+                            ) : (
+                                <Camera style={{ width: '14px', height: '14px' }} />
+                            )}
+                            {isSolvingCode ? 'Solving...' : 'Capture Code'}
+                        </button>
+                    )}
+
                     {/* Audio Settings Panel (Absolute) */}
                     {showAudioSettings && (
                         <div style={{ position: 'absolute', top: '70px', right: '140px', zIndex: 50, width: '400px', boxShadow: '0 10px 30px rgba(0,0,0,0.7)' }}>
@@ -1013,6 +1201,22 @@ export default function InterviewSessionPage() {
                         AI will reference previous Q&A and avoid repeating questions.
                     </span>
                 </div>
+            )}
+
+            {/* Coding Solution Panel (shows when screenshot captured or solving) */}
+            {(capturedScreenshot || isSolvingCode || codingSolution) && (
+                <CodingSolutionPanel
+                    screenshot={capturedScreenshot}
+                    solution={codingSolution}
+                    isLoading={isSolvingCode}
+                    error={codingError}
+                    onClose={() => {
+                        setCapturedScreenshot(null)
+                        setCodingSolution(null)
+                        setCodingError(null)
+                    }}
+                    onRetry={handleCaptureCode}
+                />
             )}
 
             {/* Context Panel */}

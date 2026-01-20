@@ -51,6 +51,22 @@ contextBridge.exposeInMainWorld('electron', {
         minimize: () => ipcRenderer.send('window:minimize'),
         maximize: () => ipcRenderer.send('window:maximize'),
         close: () => ipcRenderer.send('window:close'),
+    },
+
+    // === SCREENSHOT CAPTURE API (Coding Question Feature) ===
+    capture: {
+        setSource: (sourceId) => ipcRenderer.invoke('capture:setSource', sourceId),
+        window: () => ipcRenderer.invoke('capture:window'),
+        screen: () => ipcRenderer.invoke('capture:screen'),
+        smart: () => ipcRenderer.invoke('capture:smart'), // Auto-detect meeting/browser windows
+        getWindows: () => ipcRenderer.invoke('capture:getWindows'),
+        // Listen for hotkey trigger from main process
+        onHotkey: (callback) => {
+            ipcRenderer.on('capture:hotkeyTriggered', callback)
+        },
+        removeHotkeyListener: () => {
+            ipcRenderer.removeAllListeners('capture:hotkeyTriggered')
+        }
     }
 })
 

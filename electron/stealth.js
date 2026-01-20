@@ -63,12 +63,15 @@ class StealthManager {
      */
     _enableWindowsStealth() {
         try {
+            // Enable content protection - makes window invisible to screen capture
+            this.win.setContentProtection(true)
+
             // Always on top so coach stays visible during interview
             this.win.setAlwaysOnTop(true, 'screen-saver')
 
             this.isStealthEnabled = true
 
-            console.log('[Stealth] ✅ Windows stealth mode enabled')
+            console.log('[Stealth] ✅ Windows stealth mode enabled (content protection ON)')
             return {
                 success: true,
                 platform: 'windows',
@@ -90,6 +93,9 @@ class StealthManager {
      */
     _enableMacOSStealth() {
         try {
+            // Try content protection (may not work on all macOS versions, but worth trying)
+            this.win.setContentProtection(true)
+
             // Always on top
             this.win.setAlwaysOnTop(true, 'floating')
 
@@ -99,7 +105,7 @@ class StealthManager {
             this.isStealthEnabled = true
             this.isAutoHideActive = true
 
-            console.log('[Stealth] ✅ macOS auto-hide mode enabled')
+            console.log('[Stealth] ✅ macOS stealth mode enabled (content protection + auto-hide)')
             return {
                 success: true,
                 platform: 'darwin',
@@ -149,10 +155,9 @@ class StealthManager {
         if (platform === 'darwin') {
             // macOS: Check for common screen capture processes
             // ScreenCaptureUI = macOS native share picker
-            // screencaptureui = older macOS
-            // Zoom.us = Zoom screen sharing
-            // Electron Helper = Could be Discord/Slack screen share
-            const checkCommand = `ps aux | grep -iE "(screencaptureui|ScreenCaptureUI|controlcenter|zoom.*screen|teams.*screen|discord.*screen|obs|QuickTime.*Player)" | grep -v grep`
+            // Chrome screen_capture = Google Meet/Zoom web share
+            // Zoom.us = Zoom app screen sharing
+            const checkCommand = `ps aux | grep -iE "(screencaptureui|ScreenCaptureKit|controlcenter|zoom.*share|teams.*screen|discord.*screen|obs|QuickTime.*Player|webex|Chrome.*screen_capture|Electron.*screen)" | grep -v grep`
 
             exec(checkCommand, (error, stdout) => {
                 const isScreenCapturing = stdout.trim().length > 0

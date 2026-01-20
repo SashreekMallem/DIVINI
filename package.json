@@ -55,14 +55,25 @@
     },
     "files": [
       "electron/**/*",
-      ".next/**/*",
+      ".next/static/**/*",
       "public/**/*",
-      "node_modules/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "standalone",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "mac": {
       "target": "dmg",
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "extendInfo": {
+        "LSUIElement": true
+      }
     },
     "win": {
       "target": "nsis"
