@@ -829,519 +829,525 @@ export default function InterviewSessionPage() {
         } finally {
             setIsSolvingCode(false)
         }
-    }, [resume, jobDescription, transcriptSegments])
+        // Keep a ref to the latest handleCaptureCode to avoid re-registering the listener
+        const handleCaptureCodeRef = useRef(handleCaptureCode)
+        useEffect(() => {
+            handleCaptureCodeRef.current = handleCaptureCode
+        }, [handleCaptureCode])
 
-    // Listen for global hotkey from Electron main process
-    useEffect(() => {
-        const electron = typeof window !== 'undefined' ? (window as any).electron : null
-        if (electron?.capture?.onHotkey) {
-            console.log('🎹 Registering coding capture hotkey listener')
-            electron.capture.onHotkey(() => {
-                console.log('🎹 Hotkey triggered! Capturing...')
-                handleCaptureCode()
-            })
+        // Listen for global hotkey from Electron main process (Run ONCE)
+        useEffect(() => {
+            const electron = typeof window !== 'undefined' ? (window as any).electron : null
+            if (electron?.capture?.onHotkey) {
+                console.log('🎹 Registering coding capture hotkey listener (Singleton)')
+                electron.capture.onHotkey(() => {
+                    console.log('🎹 Hotkey triggered! calling latest handler...')
+                    if (handleCaptureCodeRef.current) {
+                        handleCaptureCodeRef.current()
+                    }
+                })
 
-            return () => {
-                electron.capture.removeHotkeyListener?.()
+                return () => {
+                    electron.capture.removeHotkeyListener?.()
+                }
             }
-        }
-    }, [handleCaptureCode])
+        }, []) // Empty dependency array = run once
 
-    // Sync selected audio source with screenshot capture module
-    useEffect(() => {
-        const electron = typeof window !== 'undefined' ? (window as any).electron : null
-        if (electron?.capture?.setSource && selectedElectronSource) {
-            electron.capture.setSource(selectedElectronSource)
-        }
-    }, [selectedElectronSource])
+        // Sync selected audio source with screenshot capture module
+        useEffect(() => {
+            const electron = typeof window !== 'undefined' ? (window as any).electron : null
+            if (electron?.capture?.setSource && selectedElectronSource) {
+                electron.capture.setSource(selectedElectronSource)
+            }
+        }, [selectedElectronSource])
 
-    const toggleStealthMode = async () => {
-        const nextState = !isStealthMode
-        const result = await screenShareManager.setStealth(nextState)
+        const toggleStealthMode = async () => {
+            const nextState = !isStealthMode
+            const result = await screenShareManager.setStealth(nextState)
 
-        if (result.success) {
-            setIsStealthMode(nextState)
+            if (result.success) {
+                setIsStealthMode(nextState)
 
-            // If enabling on macOS/Linux, show the guide
-            if (nextState && result.showGuide) {
+                // If enabling on macOS/Linux, show the guide
+                if (nextState && result.showGuide) {
+                    setShowStealthGuide(true)
+                }
+            } else if (result.showGuide) {
+                // For macOS, even if protection fails, we show the guide for the workaround
                 setShowStealthGuide(true)
             }
-        } else if (result.showGuide) {
-            // For macOS, even if protection fails, we show the guide for the workaround
-            setShowStealthGuide(true)
         }
-    }
 
-    // Effect to start recording state and timer once connected
-    useEffect(() => {
-        if (connectionStatus === 'connected' && !isRecording) {
-            console.log('🎙️ Dual-channel audio streaming active...')
-            // Note: Streaming now starts in connect(), just update UI state here
-            setIsRecording(true)
-            timerRef.current = setInterval(() => setElapsedTime(prev => prev + 1), 1000)
+        // Effect to start recording state and timer once connected
+        useEffect(() => {
+            if (connectionStatus === 'connected' && !isRecording) {
+                console.log('🎙️ Dual-channel audio streaming active...')
+                // Note: Streaming now starts in connect(), just update UI state here
+                setIsRecording(true)
+                timerRef.current = setInterval(() => setElapsedTime(prev => prev + 1), 1000)
 
-            if (interview?.id) {
-                supabase.from('interviews').update({
-                    session_status: 'in_progress',
-                    started_at: new Date().toISOString()
-                }).eq('id', interview.id)
+                if (interview?.id) {
+                    supabase.from('interviews').update({
+                        session_status: 'in_progress',
+                        started_at: new Date().toISOString()
+                    }).eq('id', interview.id)
+                }
             }
+        }, [connectionStatus, isRecording, interview?.id, supabase])
+
+        // Note: Legacy audio processing functions removed in favor of useDeepgram hook
+
+
+        const endInterview = async () => {
+            cleanup()
+            setIsRecording(false)
+            setIsRecording(false)
+            // setConnectionStatus('disconnected') // Managed by hook
+
+            // FLUSH PARTIAL TRANSCRIPT: If there's pending text, save it as a final segment
+            if (partialTranscript.trim()) {
+                const text = partialTranscript.trim()
+                // Default to 'You' for flushed segments as we can't determine speaker easily without WS data
+                // Or use the last speaker if available. Safe default is 'You' (Candidate).
+                const speaker = 'You'
+
+                setTranscriptSegments(prev => [...prev, {
+                    id: Date.now().toString(),
+                    speaker: speaker as 'You' | 'Interviewer',
+                    text: text,
+                    timestamp: Date.now()
+                }])
+
+                setTranscript(prev => prev + (prev ? '\n' : '') + text)
+
+                // Persist the flushed segment
+                await saveTranscriptSegment(text, 'candidate')
+            }
+
+            // Clear partial to remove "Listening..." UI immediately
+            setPartialTranscript('')
+
+            // SMART CONTEXT: Generate final session summary
+            const currentSessionQAs = coaching.map(c => ({
+                question: c.question,
+                answer: c.answer
+            }))
+
+            if (currentSessionQAs.length > 0 && userId.current) {
+                console.log('🧠 Generating final interview summary...')
+                const finalMemory = await generateSessionMemory(currentSessionQAs, sessionMemory)
+                setSessionMemory(finalMemory)
+
+                // Save summary to database for future multi-round context
+                await saveInterviewSummary(
+                    params?.id as string,
+                    userId.current,
+                    finalMemory,
+                    currentSessionQAs
+                )
+                console.log('✅ Interview summary saved:', {
+                    questionCount: currentSessionQAs.length,
+                    achievements: finalMemory.keyFacts.achievementsMentioned.length,
+                    gaps: finalMemory.keyFacts.gapsIdentified.length,
+                })
+            }
+
+            // Update interview with final data
+            await supabase.from('interviews').update({
+                session_status: 'completed',
+                ended_at: new Date().toISOString(),
+                actual_duration_seconds: elapsedTime,
+                total_questions: coaching.length,
+                total_answers_generated: coaching.length,
+            }).eq('id', params?.id as string)
+
+            // Update local state to show completed view
+            setInterview(prev => prev ? { ...prev, session_status: 'completed' } : null)
         }
-    }, [connectionStatus, isRecording, interview?.id, supabase])
 
-    // Note: Legacy audio processing functions removed in favor of useDeepgram hook
+        const resumeInterview = async () => {
+            setLoading(true)
+            await supabase.from('interviews').update({
+                session_status: 'in_progress'
+            }).eq('id', params?.id as string)
 
+            setInterview(prev => prev ? { ...prev, session_status: 'in_progress' } : null)
 
-    const endInterview = async () => {
-        cleanup()
-        setIsRecording(false)
-        setIsRecording(false)
-        // setConnectionStatus('disconnected') // Managed by hook
-
-        // FLUSH PARTIAL TRANSCRIPT: If there's pending text, save it as a final segment
-        if (partialTranscript.trim()) {
-            const text = partialTranscript.trim()
-            // Default to 'You' for flushed segments as we can't determine speaker easily without WS data
-            // Or use the last speaker if available. Safe default is 'You' (Candidate).
-            const speaker = 'You'
-
-            setTranscriptSegments(prev => [...prev, {
-                id: Date.now().toString(),
-                speaker: speaker as 'You' | 'Interviewer',
-                text: text,
-                timestamp: Date.now()
-            }])
-
-            setTranscript(prev => prev + (prev ? '\n' : '') + text)
-
-            // Persist the flushed segment
-            await saveTranscriptSegment(text, 'candidate')
+            // Reload history when resuming to ensure we have latest Q&A and transcripts
+            await loadInterview()
+            setLoading(false)
         }
 
-        // Clear partial to remove "Listening..." UI immediately
-        setPartialTranscript('')
+        const formatTime = (seconds: number) => {
+            const mins = Math.floor(seconds / 60)
+            const secs = seconds % 60
+            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+        }
 
-        // SMART CONTEXT: Generate final session summary
-        const currentSessionQAs = coaching.map(c => ({
-            question: c.question,
-            answer: c.answer
-        }))
+        const cardStyle = {
+            background: 'linear-gradient(135deg, rgba(24, 24, 27, 0.8) 0%, rgba(24, 24, 27, 0.4) 100%)',
+            backdropFilter: 'blur(12px)',
+            border: '1px solid rgba(255, 255, 255, 0.06)',
+            borderRadius: '20px',
+        }
 
-        if (currentSessionQAs.length > 0 && userId.current) {
-            console.log('🧠 Generating final interview summary...')
-            const finalMemory = await generateSessionMemory(currentSessionQAs, sessionMemory)
-            setSessionMemory(finalMemory)
-
-            // Save summary to database for future multi-round context
-            await saveInterviewSummary(
-                params?.id as string,
-                userId.current,
-                finalMemory,
-                currentSessionQAs
+        if (loading) {
+            return (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '80vh' }}>
+                    <Loader2 style={{ width: '32px', height: '32px', color: '#6366f1', animation: 'spin 1s linear infinite' }} />
+                </div>
             )
-            console.log('✅ Interview summary saved:', {
-                questionCount: currentSessionQAs.length,
-                achievements: finalMemory.keyFacts.achievementsMentioned.length,
-                gaps: finalMemory.keyFacts.gapsIdentified.length,
-            })
         }
 
-        // Update interview with final data
-        await supabase.from('interviews').update({
-            session_status: 'completed',
-            ended_at: new Date().toISOString(),
-            actual_duration_seconds: elapsedTime,
-            total_questions: coaching.length,
-            total_answers_generated: coaching.length,
-        }).eq('id', params?.id as string)
+        const hasContext = resume?.content || jobDescription?.content || company?.name
+        const hasMultiRoundContext = multiRoundContext && multiRoundContext.previousRounds.length > 0
 
-        // Update local state to show completed view
-        setInterview(prev => prev ? { ...prev, session_status: 'completed' } : null)
-    }
+        // STEALTH MODE: Removed render-blocking black screen.
+        // We will keep the app visible to the user while capturing audio.
 
-    const resumeInterview = async () => {
-        setLoading(true)
-        await supabase.from('interviews').update({
-            session_status: 'in_progress'
-        }).eq('id', params?.id as string)
-
-        setInterview(prev => prev ? { ...prev, session_status: 'in_progress' } : null)
-
-        // Reload history when resuming to ensure we have latest Q&A and transcripts
-        await loadInterview()
-        setLoading(false)
-    }
-
-    const formatTime = (seconds: number) => {
-        const mins = Math.floor(seconds / 60)
-        const secs = seconds % 60
-        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
-    }
-
-    const cardStyle = {
-        background: 'linear-gradient(135deg, rgba(24, 24, 27, 0.8) 0%, rgba(24, 24, 27, 0.4) 100%)',
-        backdropFilter: 'blur(12px)',
-        border: '1px solid rgba(255, 255, 255, 0.06)',
-        borderRadius: '20px',
-    }
-
-    if (loading) {
         return (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '80vh' }}>
-                <Loader2 style={{ width: '32px', height: '32px', color: '#6366f1', animation: 'spin 1s linear infinite' }} />
+            <div style={{ height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column' }}>
+                {/* Header */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexShrink: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                        <button onClick={() => router.push('/interviews')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', background: 'rgba(39, 39, 42, 0.8)', border: 'none', borderRadius: '10px', color: '#a1a1aa', fontSize: '14px', cursor: 'pointer' }}>
+                            <ChevronLeft style={{ width: '16px', height: '16px' }} /> Back
+                        </button>
+                        <div>
+                            <h1 style={{ fontSize: '22px', fontWeight: 600 }}>{interview?.round_name || 'Interview Session'}</h1>
+                            <p style={{ fontSize: '13px', color: '#71717a' }}>
+                                {company?.name && `${company.name} • `}
+                                {jobDescription?.role_title && `${jobDescription.role_title} • `}
+                                {interview?.interview_type?.replace('_', ' ')}
+                            </p>
+                        </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        {/* Audio Settings Toggle */}
+                        <button onClick={() => setShowAudioSettings(!showAudioSettings)} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: showAudioSettings ? 'rgba(255, 255, 255, 0.1)' : 'rgba(39, 39, 42, 0.8)', border: '1px solid transparent', borderRadius: '10px', color: 'white', fontSize: '13px', cursor: 'pointer' }}>
+                            <Settings style={{ width: '14px', height: '14px' }} /> Audio
+                        </button>
+
+                        {/* Context Toggle */}
+                        <button onClick={() => setShowContext(!showContext)} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: showContext ? 'rgba(99, 102, 241, 0.2)' : 'rgba(39, 39, 42, 0.8)', border: showContext ? '1px solid rgba(99, 102, 241, 0.3)' : '1px solid transparent', borderRadius: '10px', color: showContext ? '#6366f1' : '#a1a1aa', fontSize: '13px', cursor: 'pointer' }}>
+                            <FileText style={{ width: '14px', height: '14px' }} /> Context
+                        </button>
+
+                        {/* Stealth Mode Toggle (Electron Only) */}
+                        {isElectron && (
+                            <button
+                                onClick={toggleStealthMode}
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    padding: '8px 14px',
+                                    background: isStealthMode ? 'rgba(239, 68, 68, 0.1)' : 'rgba(39, 39, 42, 0.8)',
+                                    border: '1px solid transparent',
+                                    borderRadius: '10px',
+                                    color: isStealthMode ? '#ef4444' : '#a1a1aa',
+                                    fontSize: '13px',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                <EyeOff style={{ width: '14px', height: '14px' }} />
+                                Stealth: {isStealthMode ? 'ON' : 'OFF'}
+                            </button>
+                        )}
+
+                        {/* Coding Capture Button (Electron only) */}
+                        {isElectron && (
+                            <button
+                                onClick={handleCaptureCode}
+                                disabled={isSolvingCode}
+                                title="Capture coding problem (Cmd/Ctrl+Shift+C)"
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    padding: '8px 14px',
+                                    background: isSolvingCode ? 'rgba(34, 197, 94, 0.2)' : 'rgba(39, 39, 42, 0.8)',
+                                    border: '1px solid transparent',
+                                    borderRadius: '10px',
+                                    color: isSolvingCode ? '#22c55e' : '#a1a1aa',
+                                    fontSize: '13px',
+                                    cursor: isSolvingCode ? 'wait' : 'pointer'
+                                }}
+                            >
+                                {isSolvingCode ? (
+                                    <Loader2 style={{ width: '14px', height: '14px', animation: 'spin 1s linear infinite' }} />
+                                ) : (
+                                    <Camera style={{ width: '14px', height: '14px' }} />
+                                )}
+                                {isSolvingCode ? 'Solving...' : 'Capture Code'}
+                            </button>
+                        )}
+
+                        {/* Audio Settings Panel (Absolute) */}
+                        {showAudioSettings && (
+                            <div style={{ position: 'absolute', top: '70px', right: '140px', zIndex: 50, width: '400px', boxShadow: '0 10px 30px rgba(0,0,0,0.7)' }}>
+                                <AudioSettingsPanel
+                                    selectedMicId={selectedMicId}
+                                    setSelectedMicId={setSelectedMicId}
+                                    useSystemAudio={useSystemAudio}
+                                    setUseSystemAudio={setUseSystemAudio}
+                                    isMicMuted={isMicMuted}
+                                    toggleMicMute={toggleMicMute}
+                                    isRecording={isRecording}
+                                    audioDevices={audioDevices}
+                                    onConnectTab={handleConnectTab}
+                                    connectedTabName={connectedTabName}
+                                    isConnectingTab={isConnectingTab}
+                                />
+
+                                {/* Electron-Specific: Audio Source Selector */}
+                                {typeof window !== 'undefined' && window.electron && useSystemAudio && !isRecording && (
+                                    <div style={{ marginTop: '12px' }}>
+                                        <AudioSourceSelector
+                                            onSourceSelected={setSelectedElectronSource}
+                                            selectedSourceId={selectedElectronSource}
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Connection Status or Completed Status */}
+                        {interview?.session_status === 'completed' ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <div style={{ padding: '8px 12px', background: 'rgba(39, 39, 42, 0.5)', borderRadius: '8px', color: '#a1a1aa', fontSize: '13px', fontWeight: 500, border: '1px solid rgba(255,255,255,0.1)' }}>
+                                    Session Completed
+                                </div>
+                                <button onClick={resumeInterview} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', borderRadius: '12px', color: '#818cf8', fontSize: '14px', fontWeight: 600, cursor: 'pointer' }}>
+                                    <RefreshCw style={{ width: '16px', height: '16px' }} /> Resume
+                                </button>
+                            </div>
+                        ) : (
+                            <>
+                                {/* Connection Status */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: connectionStatus === 'connected' ? 'rgba(34, 197, 94, 0.1)' : connectionStatus === 'connecting' ? 'rgba(234, 179, 8, 0.1)' : 'rgba(113, 113, 122, 0.1)', borderRadius: '8px', fontSize: '12px', color: connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#71717a' }}>
+                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#71717a' }} />
+                                    {connectionStatus === 'connected' ? 'Live' : connectionStatus === 'connecting' ? 'Connecting...' : 'Ready'}
+                                </div>
+
+                                {/* Timer */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 16px', background: isRecording ? 'rgba(239, 68, 68, 0.1)' : 'rgba(39, 39, 42, 0.8)', borderRadius: '10px', fontFamily: 'monospace', fontSize: '16px', fontWeight: 600, color: isRecording ? '#ef4444' : 'white' }}>
+                                    <Clock style={{ width: '16px', height: '16px' }} />
+                                    {formatTime(elapsedTime)}
+                                    {isRecording && <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444', animation: 'pulse 1s infinite' }} />}
+                                </div>
+
+                                {!isRecording ? (
+                                    <button onClick={startRecording} disabled={connectionStatus === 'connecting'} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'linear-gradient(135deg, #22c55e, #16a34a)', border: 'none', borderRadius: '12px', color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 16px rgba(34, 197, 94, 0.3)' }}>
+                                        <Mic style={{ width: '16px', height: '16px' }} /> Start
+                                    </button>
+                                ) : (
+                                    <>
+                                        {/* Mic Mute Toggle */}
+                                        <button
+                                            onClick={toggleMicMute}
+                                            title={isMicMuted ? 'Unmute Microphone' : 'Mute Microphone'}
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                width: '42px',
+                                                height: '42px',
+                                                background: isMicMuted ? 'rgba(239, 68, 68, 0.2)' : 'rgba(39, 39, 42, 0.8)',
+                                                border: isMicMuted ? '1px solid rgba(239, 68, 68, 0.3)' : '1px solid rgba(255,255,255,0.1)',
+                                                borderRadius: '12px',
+                                                color: isMicMuted ? '#ef4444' : 'white',
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            {isMicMuted ? (
+                                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                                                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
+                                                    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
+                                                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                                                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                                                </svg>
+                                            ) : (
+                                                <Mic style={{ width: '18px', height: '18px' }} />
+                                            )}
+                                        </button>
+
+                                        {/* End Button */}
+                                        <button onClick={endInterview} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'linear-gradient(135deg, #ef4444, #dc2626)', border: 'none', borderRadius: '12px', color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 16px rgba(239, 68, 68, 0.3)' }}>
+                                            <Square style={{ width: '16px', height: '16px' }} /> End
+                                        </button>
+                                    </>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
+
+                {/* Errors and Warnings */}
+                {error && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#ef4444', fontSize: '13px' }}>
+                        <AlertCircle style={{ width: '16px', height: '16px' }} /> {error}
+                    </div>
+                )}
+
+                {!hasContext && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#eab308', fontSize: '13px' }}>
+                        <AlertCircle style={{ width: '16px', height: '16px' }} />
+                        No resume, JD, or company linked. AI coaching will be generic. Add context in interview setup.
+                    </div>
+                )}
+
+                {hasMultiRoundContext && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#818cf8', fontSize: '13px' }}>
+                        <Sparkles style={{ width: '16px', height: '16px' }} />
+                        <span>
+                            <strong>Multi-Round Context Active:</strong> {multiRoundContext.previousRounds.length} previous round(s) loaded.
+                            AI will reference previous Q&A and avoid repeating questions.
+                        </span>
+                    </div>
+                )}
+
+                {/* Coding Solution Panel (shows when screenshot captured or solving) */}
+                {(capturedScreenshot || isSolvingCode || codingSolution) && (
+                    <CodingSolutionPanel
+                        screenshot={capturedScreenshot}
+                        solution={codingSolution}
+                        isLoading={isSolvingCode}
+                        error={codingError}
+                        onClose={() => {
+                            setCapturedScreenshot(null)
+                            setCodingSolution(null)
+                            setCodingError(null)
+                        }}
+                        onRetry={handleCaptureCode}
+                    />
+                )}
+
+                {/* Context Panel */}
+                {showContext && (
+                    <div style={{ ...cardStyle, padding: '16px', marginBottom: '12px', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
+                        <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#6366f1' }}>
+                                <FileText style={{ width: '14px', height: '14px' }} />
+                                <span style={{ fontWeight: 600, fontSize: '13px' }}>Resume</span>
+                            </div>
+                            <p style={{ fontSize: '12px', color: '#a1a1aa', maxHeight: '80px', overflow: 'auto' }}>
+                                {resume?.content ? `${resume.content.substring(0, 200)}...` : 'No resume linked'}
+                            </p>
+                        </div>
+                        <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#a855f7' }}>
+                                <Briefcase style={{ width: '14px', height: '14px' }} />
+                                <span style={{ fontWeight: 600, fontSize: '13px' }}>Job Description</span>
+                            </div>
+                            <p style={{ fontSize: '12px', color: '#a1a1aa', maxHeight: '80px', overflow: 'auto' }}>
+                                {jobDescription?.content ? `${jobDescription.content.substring(0, 200)}...` : 'No JD linked'}
+                            </p>
+                        </div>
+                        <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#22c55e' }}>
+                                <Building2 style={{ width: '14px', height: '14px' }} />
+                                <span style={{ fontWeight: 600, fontSize: '13px' }}>Company</span>
+                            </div>
+                            <p style={{ fontSize: '12px', color: '#a1a1aa' }}>
+                                {company?.culture_notes && <span style={{ display: 'block', marginTop: '2px', opacity: 0.7 }} className="line-clamp-1">{company.culture_notes}</span>}
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {/* Main Content - 2 Column */}
+                <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', minHeight: 0 }}>
+                    {/* Transcript Panel */}
+                    <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                        <div style={{ padding: '14px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                            <Volume2 style={{ width: '16px', height: '16px', color: '#6366f1' }} />
+                            <h2 style={{ fontSize: '14px', fontWeight: 600 }}>Live Transcript</h2>
+                            {isRecording && <span style={{ marginLeft: 'auto', padding: '3px 8px', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '6px', fontSize: '11px', color: '#22c55e' }}>Listening...</span>}
+                        </div>
+
+                        <div ref={transcriptRef} style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            {transcriptSegments.length > 0 || partialTranscript ? (
+                                <>
+                                    {transcriptSegments.map((seg) => (
+                                        <div key={seg.id} style={{
+                                            alignSelf: seg.speaker === 'You' ? 'flex-end' : 'flex-start',
+                                            maxWidth: '85%',
+                                            padding: '10px 14px',
+                                            borderRadius: '16px',
+                                            borderTopRightRadius: seg.speaker === 'You' ? '4px' : '16px',
+                                            borderTopLeftRadius: seg.speaker === 'Interviewer' ? '4px' : '16px',
+                                            background: seg.speaker === 'You' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(39, 39, 42, 0.6)',
+                                            border: seg.speaker === 'You' ? '1px solid rgba(99, 102, 241, 0.2)' : '1px solid rgba(255, 255, 255, 0.05)',
+                                        }}>
+                                            <p style={{ fontSize: '11px', color: seg.speaker === 'You' ? '#818cf8' : '#a1a1aa', marginBottom: '4px', fontWeight: 600 }}>
+                                                {seg.speaker === 'You' ? 'You' : 'Interviewer'}
+                                            </p>
+                                            <p style={{ fontSize: '14px', color: '#e4e4e7', lineHeight: 1.5 }}>{seg.text}</p>
+                                        </div>
+                                    ))}
+
+                                    {partialTranscript && (
+                                        <div style={{
+                                            alignSelf: 'center',
+                                            width: '100%',
+                                            padding: '10px 14px',
+                                            background: 'transparent',
+                                            border: '1px dashed rgba(255, 255, 255, 0.1)',
+                                            borderRadius: '12px',
+                                            marginTop: '8px'
+                                        }}>
+                                            <p style={{ fontSize: '11px', color: '#71717a', marginBottom: '4px', textAlign: 'center' }}>Listening...</p>
+                                            <p style={{ fontSize: '14px', color: '#a1a1aa', lineHeight: 1.5, textAlign: 'center', fontStyle: 'italic' }}>
+                                                {partialTranscript}
+                                            </p>
+                                        </div>
+                                    )}
+                                </>
+                            ) : (
+                                <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+                                    <div>
+                                        <MessageSquare style={{ width: '40px', height: '40px', color: '#3f3f46', margin: '0 auto 12px' }} />
+                                        <p style={{ color: '#71717a', fontSize: '13px' }}>{isRecording ? 'Listening for speech...' : 'Click Start to begin'}</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Coaching Panel */}
+                    <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                        <div style={{ padding: '14px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                            <Sparkles style={{ width: '16px', height: '16px', color: '#a855f7' }} />
+                            <h2 style={{ fontSize: '14px', fontWeight: 600 }}>AI Coaching</h2>
+                            <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#71717a' }}>{coaching.length} answers</span>
+                            {isGenerating && <Loader2 style={{ width: '14px', height: '14px', color: '#a855f7', animation: 'spin 1s linear infinite' }} />}
+                        </div>
+
+                        <div ref={coachingRef} style={{ flex: 1, padding: '12px', overflowY: 'auto' }}>
+                            {coaching.length > 0 ? (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                    {coaching.map((entry) => (
+                                        <div key={entry.id} style={{ padding: '12px', background: 'rgba(168, 85, 247, 0.05)', border: '1px solid rgba(168, 85, 247, 0.1)', borderRadius: '12px' }}>
+                                            <p style={{ fontSize: '12px', color: '#a855f7', marginBottom: '6px', fontWeight: 500 }}>Q: {entry.question}</p>
+                                            <p style={{ fontSize: '13px', color: '#e4e4e7', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{entry.answer}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+                                    <div>
+                                        <Sparkles style={{ width: '40px', height: '40px', color: '#3f3f46', margin: '0 auto 12px' }} />
+                                        <p style={{ color: '#71717a', fontSize: '13px', maxWidth: '240px' }}>AI answers will appear when questions are detected</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+
             </div>
         )
     }
-
-    const hasContext = resume?.content || jobDescription?.content || company?.name
-    const hasMultiRoundContext = multiRoundContext && multiRoundContext.previousRounds.length > 0
-
-    // STEALTH MODE: Removed render-blocking black screen.
-    // We will keep the app visible to the user while capturing audio.
-
-    return (
-        <div style={{ height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column' }}>
-            {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexShrink: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                    <button onClick={() => router.push('/interviews')} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', background: 'rgba(39, 39, 42, 0.8)', border: 'none', borderRadius: '10px', color: '#a1a1aa', fontSize: '14px', cursor: 'pointer' }}>
-                        <ChevronLeft style={{ width: '16px', height: '16px' }} /> Back
-                    </button>
-                    <div>
-                        <h1 style={{ fontSize: '22px', fontWeight: 600 }}>{interview?.round_name || 'Interview Session'}</h1>
-                        <p style={{ fontSize: '13px', color: '#71717a' }}>
-                            {company?.name && `${company.name} • `}
-                            {jobDescription?.role_title && `${jobDescription.role_title} • `}
-                            {interview?.interview_type?.replace('_', ' ')}
-                        </p>
-                    </div>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    {/* Audio Settings Toggle */}
-                    <button onClick={() => setShowAudioSettings(!showAudioSettings)} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: showAudioSettings ? 'rgba(255, 255, 255, 0.1)' : 'rgba(39, 39, 42, 0.8)', border: '1px solid transparent', borderRadius: '10px', color: 'white', fontSize: '13px', cursor: 'pointer' }}>
-                        <Settings style={{ width: '14px', height: '14px' }} /> Audio
-                    </button>
-
-                    {/* Context Toggle */}
-                    <button onClick={() => setShowContext(!showContext)} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: showContext ? 'rgba(99, 102, 241, 0.2)' : 'rgba(39, 39, 42, 0.8)', border: showContext ? '1px solid rgba(99, 102, 241, 0.3)' : '1px solid transparent', borderRadius: '10px', color: showContext ? '#6366f1' : '#a1a1aa', fontSize: '13px', cursor: 'pointer' }}>
-                        <FileText style={{ width: '14px', height: '14px' }} /> Context
-                    </button>
-
-                    {/* Stealth Mode Toggle (Electron Only) */}
-                    {isElectron && (
-                        <button
-                            onClick={toggleStealthMode}
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                                padding: '8px 14px',
-                                background: isStealthMode ? 'rgba(239, 68, 68, 0.1)' : 'rgba(39, 39, 42, 0.8)',
-                                border: '1px solid transparent',
-                                borderRadius: '10px',
-                                color: isStealthMode ? '#ef4444' : '#a1a1aa',
-                                fontSize: '13px',
-                                cursor: 'pointer'
-                            }}
-                        >
-                            <EyeOff style={{ width: '14px', height: '14px' }} />
-                            Stealth: {isStealthMode ? 'ON' : 'OFF'}
-                        </button>
-                    )}
-
-                    {/* Coding Capture Button (Electron only) */}
-                    {isElectron && (
-                        <button
-                            onClick={handleCaptureCode}
-                            disabled={isSolvingCode}
-                            title="Capture coding problem (Cmd/Ctrl+Shift+C)"
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                                padding: '8px 14px',
-                                background: isSolvingCode ? 'rgba(34, 197, 94, 0.2)' : 'rgba(39, 39, 42, 0.8)',
-                                border: '1px solid transparent',
-                                borderRadius: '10px',
-                                color: isSolvingCode ? '#22c55e' : '#a1a1aa',
-                                fontSize: '13px',
-                                cursor: isSolvingCode ? 'wait' : 'pointer'
-                            }}
-                        >
-                            {isSolvingCode ? (
-                                <Loader2 style={{ width: '14px', height: '14px', animation: 'spin 1s linear infinite' }} />
-                            ) : (
-                                <Camera style={{ width: '14px', height: '14px' }} />
-                            )}
-                            {isSolvingCode ? 'Solving...' : 'Capture Code'}
-                        </button>
-                    )}
-
-                    {/* Audio Settings Panel (Absolute) */}
-                    {showAudioSettings && (
-                        <div style={{ position: 'absolute', top: '70px', right: '140px', zIndex: 50, width: '400px', boxShadow: '0 10px 30px rgba(0,0,0,0.7)' }}>
-                            <AudioSettingsPanel
-                                selectedMicId={selectedMicId}
-                                setSelectedMicId={setSelectedMicId}
-                                useSystemAudio={useSystemAudio}
-                                setUseSystemAudio={setUseSystemAudio}
-                                isMicMuted={isMicMuted}
-                                toggleMicMute={toggleMicMute}
-                                isRecording={isRecording}
-                                audioDevices={audioDevices}
-                                onConnectTab={handleConnectTab}
-                                connectedTabName={connectedTabName}
-                                isConnectingTab={isConnectingTab}
-                            />
-
-                            {/* Electron-Specific: Audio Source Selector */}
-                            {typeof window !== 'undefined' && window.electron && useSystemAudio && !isRecording && (
-                                <div style={{ marginTop: '12px' }}>
-                                    <AudioSourceSelector
-                                        onSourceSelected={setSelectedElectronSource}
-                                        selectedSourceId={selectedElectronSource}
-                                    />
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    {/* Connection Status or Completed Status */}
-                    {interview?.session_status === 'completed' ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                            <div style={{ padding: '8px 12px', background: 'rgba(39, 39, 42, 0.5)', borderRadius: '8px', color: '#a1a1aa', fontSize: '13px', fontWeight: 500, border: '1px solid rgba(255,255,255,0.1)' }}>
-                                Session Completed
-                            </div>
-                            <button onClick={resumeInterview} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', borderRadius: '12px', color: '#818cf8', fontSize: '14px', fontWeight: 600, cursor: 'pointer' }}>
-                                <RefreshCw style={{ width: '16px', height: '16px' }} /> Resume
-                            </button>
-                        </div>
-                    ) : (
-                        <>
-                            {/* Connection Status */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: connectionStatus === 'connected' ? 'rgba(34, 197, 94, 0.1)' : connectionStatus === 'connecting' ? 'rgba(234, 179, 8, 0.1)' : 'rgba(113, 113, 122, 0.1)', borderRadius: '8px', fontSize: '12px', color: connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#71717a' }}>
-                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: connectionStatus === 'connected' ? '#22c55e' : connectionStatus === 'connecting' ? '#eab308' : '#71717a' }} />
-                                {connectionStatus === 'connected' ? 'Live' : connectionStatus === 'connecting' ? 'Connecting...' : 'Ready'}
-                            </div>
-
-                            {/* Timer */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 16px', background: isRecording ? 'rgba(239, 68, 68, 0.1)' : 'rgba(39, 39, 42, 0.8)', borderRadius: '10px', fontFamily: 'monospace', fontSize: '16px', fontWeight: 600, color: isRecording ? '#ef4444' : 'white' }}>
-                                <Clock style={{ width: '16px', height: '16px' }} />
-                                {formatTime(elapsedTime)}
-                                {isRecording && <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444', animation: 'pulse 1s infinite' }} />}
-                            </div>
-
-                            {!isRecording ? (
-                                <button onClick={startRecording} disabled={connectionStatus === 'connecting'} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'linear-gradient(135deg, #22c55e, #16a34a)', border: 'none', borderRadius: '12px', color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 16px rgba(34, 197, 94, 0.3)' }}>
-                                    <Mic style={{ width: '16px', height: '16px' }} /> Start
-                                </button>
-                            ) : (
-                                <>
-                                    {/* Mic Mute Toggle */}
-                                    <button
-                                        onClick={toggleMicMute}
-                                        title={isMicMuted ? 'Unmute Microphone' : 'Mute Microphone'}
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                            width: '42px',
-                                            height: '42px',
-                                            background: isMicMuted ? 'rgba(239, 68, 68, 0.2)' : 'rgba(39, 39, 42, 0.8)',
-                                            border: isMicMuted ? '1px solid rgba(239, 68, 68, 0.3)' : '1px solid rgba(255,255,255,0.1)',
-                                            borderRadius: '12px',
-                                            color: isMicMuted ? '#ef4444' : 'white',
-                                            cursor: 'pointer'
-                                        }}
-                                    >
-                                        {isMicMuted ? (
-                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                <line x1="1" y1="1" x2="23" y2="23"></line>
-                                                <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
-                                                <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
-                                                <line x1="12" y1="19" x2="12" y2="23"></line>
-                                                <line x1="8" y1="23" x2="16" y2="23"></line>
-                                            </svg>
-                                        ) : (
-                                            <Mic style={{ width: '18px', height: '18px' }} />
-                                        )}
-                                    </button>
-
-                                    {/* End Button */}
-                                    <button onClick={endInterview} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', background: 'linear-gradient(135deg, #ef4444, #dc2626)', border: 'none', borderRadius: '12px', color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 16px rgba(239, 68, 68, 0.3)' }}>
-                                        <Square style={{ width: '16px', height: '16px' }} /> End
-                                    </button>
-                                </>
-                            )}
-                        </>
-                    )}
-                </div>
-            </div>
-
-            {/* Errors and Warnings */}
-            {error && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#ef4444', fontSize: '13px' }}>
-                    <AlertCircle style={{ width: '16px', height: '16px' }} /> {error}
-                </div>
-            )}
-
-            {!hasContext && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#eab308', fontSize: '13px' }}>
-                    <AlertCircle style={{ width: '16px', height: '16px' }} />
-                    No resume, JD, or company linked. AI coaching will be generic. Add context in interview setup.
-                </div>
-            )}
-
-            {hasMultiRoundContext && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)', borderRadius: '10px', marginBottom: '12px', color: '#818cf8', fontSize: '13px' }}>
-                    <Sparkles style={{ width: '16px', height: '16px' }} />
-                    <span>
-                        <strong>Multi-Round Context Active:</strong> {multiRoundContext.previousRounds.length} previous round(s) loaded.
-                        AI will reference previous Q&A and avoid repeating questions.
-                    </span>
-                </div>
-            )}
-
-            {/* Coding Solution Panel (shows when screenshot captured or solving) */}
-            {(capturedScreenshot || isSolvingCode || codingSolution) && (
-                <CodingSolutionPanel
-                    screenshot={capturedScreenshot}
-                    solution={codingSolution}
-                    isLoading={isSolvingCode}
-                    error={codingError}
-                    onClose={() => {
-                        setCapturedScreenshot(null)
-                        setCodingSolution(null)
-                        setCodingError(null)
-                    }}
-                    onRetry={handleCaptureCode}
-                />
-            )}
-
-            {/* Context Panel */}
-            {showContext && (
-                <div style={{ ...cardStyle, padding: '16px', marginBottom: '12px', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
-                    <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#6366f1' }}>
-                            <FileText style={{ width: '14px', height: '14px' }} />
-                            <span style={{ fontWeight: 600, fontSize: '13px' }}>Resume</span>
-                        </div>
-                        <p style={{ fontSize: '12px', color: '#a1a1aa', maxHeight: '80px', overflow: 'auto' }}>
-                            {resume?.content ? `${resume.content.substring(0, 200)}...` : 'No resume linked'}
-                        </p>
-                    </div>
-                    <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#a855f7' }}>
-                            <Briefcase style={{ width: '14px', height: '14px' }} />
-                            <span style={{ fontWeight: 600, fontSize: '13px' }}>Job Description</span>
-                        </div>
-                        <p style={{ fontSize: '12px', color: '#a1a1aa', maxHeight: '80px', overflow: 'auto' }}>
-                            {jobDescription?.content ? `${jobDescription.content.substring(0, 200)}...` : 'No JD linked'}
-                        </p>
-                    </div>
-                    <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#22c55e' }}>
-                            <Building2 style={{ width: '14px', height: '14px' }} />
-                            <span style={{ fontWeight: 600, fontSize: '13px' }}>Company</span>
-                        </div>
-                        <p style={{ fontSize: '12px', color: '#a1a1aa' }}>
-                            {company?.culture_notes && <span style={{ display: 'block', marginTop: '2px', opacity: 0.7 }} className="line-clamp-1">{company.culture_notes}</span>}
-                        </p>
-                    </div>
-                </div>
-            )}
-
-            {/* Main Content - 2 Column */}
-            <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', minHeight: 0 }}>
-                {/* Transcript Panel */}
-                <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                    <div style={{ padding: '14px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
-                        <Volume2 style={{ width: '16px', height: '16px', color: '#6366f1' }} />
-                        <h2 style={{ fontSize: '14px', fontWeight: 600 }}>Live Transcript</h2>
-                        {isRecording && <span style={{ marginLeft: 'auto', padding: '3px 8px', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '6px', fontSize: '11px', color: '#22c55e' }}>Listening...</span>}
-                    </div>
-
-                    <div ref={transcriptRef} style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                        {transcriptSegments.length > 0 || partialTranscript ? (
-                            <>
-                                {transcriptSegments.map((seg) => (
-                                    <div key={seg.id} style={{
-                                        alignSelf: seg.speaker === 'You' ? 'flex-end' : 'flex-start',
-                                        maxWidth: '85%',
-                                        padding: '10px 14px',
-                                        borderRadius: '16px',
-                                        borderTopRightRadius: seg.speaker === 'You' ? '4px' : '16px',
-                                        borderTopLeftRadius: seg.speaker === 'Interviewer' ? '4px' : '16px',
-                                        background: seg.speaker === 'You' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(39, 39, 42, 0.6)',
-                                        border: seg.speaker === 'You' ? '1px solid rgba(99, 102, 241, 0.2)' : '1px solid rgba(255, 255, 255, 0.05)',
-                                    }}>
-                                        <p style={{ fontSize: '11px', color: seg.speaker === 'You' ? '#818cf8' : '#a1a1aa', marginBottom: '4px', fontWeight: 600 }}>
-                                            {seg.speaker === 'You' ? 'You' : 'Interviewer'}
-                                        </p>
-                                        <p style={{ fontSize: '14px', color: '#e4e4e7', lineHeight: 1.5 }}>{seg.text}</p>
-                                    </div>
-                                ))}
-
-                                {partialTranscript && (
-                                    <div style={{
-                                        alignSelf: 'center',
-                                        width: '100%',
-                                        padding: '10px 14px',
-                                        background: 'transparent',
-                                        border: '1px dashed rgba(255, 255, 255, 0.1)',
-                                        borderRadius: '12px',
-                                        marginTop: '8px'
-                                    }}>
-                                        <p style={{ fontSize: '11px', color: '#71717a', marginBottom: '4px', textAlign: 'center' }}>Listening...</p>
-                                        <p style={{ fontSize: '14px', color: '#a1a1aa', lineHeight: 1.5, textAlign: 'center', fontStyle: 'italic' }}>
-                                            {partialTranscript}
-                                        </p>
-                                    </div>
-                                )}
-                            </>
-                        ) : (
-                            <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
-                                <div>
-                                    <MessageSquare style={{ width: '40px', height: '40px', color: '#3f3f46', margin: '0 auto 12px' }} />
-                                    <p style={{ color: '#71717a', fontSize: '13px' }}>{isRecording ? 'Listening for speech...' : 'Click Start to begin'}</p>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </div>
-
-                {/* Coaching Panel */}
-                <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                    <div style={{ padding: '14px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
-                        <Sparkles style={{ width: '16px', height: '16px', color: '#a855f7' }} />
-                        <h2 style={{ fontSize: '14px', fontWeight: 600 }}>AI Coaching</h2>
-                        <span style={{ marginLeft: 'auto', fontSize: '11px', color: '#71717a' }}>{coaching.length} answers</span>
-                        {isGenerating && <Loader2 style={{ width: '14px', height: '14px', color: '#a855f7', animation: 'spin 1s linear infinite' }} />}
-                    </div>
-
-                    <div ref={coachingRef} style={{ flex: 1, padding: '12px', overflowY: 'auto' }}>
-                        {coaching.length > 0 ? (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                {coaching.map((entry) => (
-                                    <div key={entry.id} style={{ padding: '12px', background: 'rgba(168, 85, 247, 0.05)', border: '1px solid rgba(168, 85, 247, 0.1)', borderRadius: '12px' }}>
-                                        <p style={{ fontSize: '12px', color: '#a855f7', marginBottom: '6px', fontWeight: 500 }}>Q: {entry.question}</p>
-                                        <p style={{ fontSize: '13px', color: '#e4e4e7', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{entry.answer}</p>
-                                    </div>
-                                ))}
-                            </div>
-                        ) : (
-                            <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
-                                <div>
-                                    <Sparkles style={{ width: '40px', height: '40px', color: '#3f3f46', margin: '0 auto 12px' }} />
-                                    <p style={{ color: '#71717a', fontSize: '13px', maxWidth: '240px' }}>AI answers will appear when questions are detected</p>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </div>
-
-        </div>
-    )
-}

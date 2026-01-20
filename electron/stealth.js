@@ -154,27 +154,27 @@ class StealthManager {
 
         if (platform === 'darwin') {
             // macOS: Check for common screen capture processes
-            // ScreenCaptureUI = macOS native share picker
-            // Chrome screen_capture = Google Meet/Zoom web share
-            // Zoom.us = Zoom app screen sharing
-            const checkCommand = `ps aux | grep -iE "(screencaptureui|ScreenCaptureKit|controlcenter|zoom.*share|teams.*screen|discord.*screen|obs|QuickTime.*Player|webex|Chrome.*screen_capture|Electron.*screen)" | grep -v grep`
+            // We exclude our own process names to prevent self-hiding
+            // when audio loopback or screenshots are active.
+            const selfExclude = 'grep -vE "(core-audio-helper|Electron|DIVINI)"'
+            const checkCommand = `ps aux | grep -iE "(screencaptureui|ScreenCaptureKit|zoom.*share|teams.*screen|discord.*screen|obs|QuickTime.*Player|webex|Chrome.*screen_capture)" | ${selfExclude} | grep -v grep`
 
             exec(checkCommand, (error, stdout) => {
                 const isScreenCapturing = stdout.trim().length > 0
 
                 if (isScreenCapturing && this.win.isVisible() && !this.wasHiddenByAutoHide) {
                     // Screen capture started → Hide window
+                    console.log('[Stealth] 🙈 External screen share detected')
                     this._saveWindowState()
                     this.win.hide()
                     this.wasHiddenByAutoHide = true
                     this._notifyRenderer('stealth:hidden')
-                    console.log('[Stealth] 🙈 Screen share detected → Window hidden')
                 } else if (!isScreenCapturing && this.wasHiddenByAutoHide) {
                     // Screen capture stopped → Restore window
+                    console.log('[Stealth] 👁️ External screen share stopped')
                     this._restoreWindowState()
                     this._notifyRenderer('stealth:restored')
                     this.wasHiddenByAutoHide = false
-                    console.log('[Stealth] 👁️ Screen share stopped → Window restored')
                 }
             })
         }
