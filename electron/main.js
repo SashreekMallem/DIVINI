@@ -4,10 +4,18 @@ const { StealthManager } = require('./stealth')
 const { initMain } = require('electron-audio-loopback')
 
 // Initialize loopback plugin BEFORE app is ready
-initMain({
-    forceCoreAudioTap: true, // Critical for stealth on macOS
-    loopbackWithMute: false,
-})
+let loopbackInitialized = false
+try {
+    initMain({
+        forceCoreAudioTap: true, // Critical for stealth on macOS
+        loopbackWithMute: false,
+    })
+    loopbackInitialized = true
+    console.log('[Audio] electron-audio-loopback native module initialized ✅')
+} catch (err) {
+    console.error('[Audio] ❌ FAILED to initialize electron-audio-loopback:', err.message)
+    console.error('[Audio] Universal System Audio will NOT work in production!')
+}
 
 const APP_URL = process.env.DIVINI_APP_URL || 'https://divini.vercel.app'
 
@@ -53,6 +61,12 @@ function createWindow() {
             return { action: 'deny' }
         }
         return { action: 'allow' }
+    })
+
+    // Forward renderer logs to main console (for production debugging)
+    mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+        const prefix = level === 0 ? '[Renderer Log]' : level === 1 ? '[Renderer Warn]' : '[Renderer Err]'
+        console.log(`${prefix} ${message}`)
     })
 
     mainWindow.on('closed', () => {
@@ -118,10 +132,21 @@ function setupIpcHandlers() {
     })
 }
 
+// Debounce tracker for hotkeys
+let lastCaptureTime = 0
+const CAPTURE_DEBOUNCE_MS = 500
+
 function registerGlobalShortcuts() {
-    // Cmd/Ctrl+Shift+C = Capture coding problem
+    // Cmd/Ctrl+Shift+C = Capture coding problem (with debounce)
     const captureShortcut = process.platform === 'darwin' ? 'Command+Shift+C' : 'Ctrl+Shift+C'
     globalShortcut.register(captureShortcut, async () => {
+        const now = Date.now()
+        if (now - lastCaptureTime < CAPTURE_DEBOUNCE_MS) {
+            console.log('[Hotkey] Capture debounced (too fast)')
+            return
+        }
+        lastCaptureTime = now
+
         console.log('[Hotkey] Capture shortcut triggered')
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('trigger-capture')

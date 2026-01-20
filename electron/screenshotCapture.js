@@ -119,10 +119,13 @@ async function captureMeetingWindow() {
 
         // 1. Priority: Explicitly selected audio source
         if (selectedSourceId) {
+            // Skip DIVINI/Electron windows - don't capture ourselves
             const selected = sources.find(s => s.id === selectedSourceId)
-            if (selected) {
+            if (selected && !selected.name.toLowerCase().includes('divini') && !selected.name.toLowerCase().includes('electron')) {
                 console.log('[Screenshot] using selected source:', selected.name)
-                return { image: selected.thumbnail.toDataURL(), windowName: selected.name }
+                return { success: true, image: selected.thumbnail.toDataURL(), windowName: selected.name }
+            } else if (selected) {
+                console.warn('[Screenshot] Selected source is DIVINI app itself, skipping to smart detect...')
             } else {
                 console.warn('[Screenshot] Selected source not found (hidden/full-screen?). Trying fallback...')
             }
@@ -148,7 +151,7 @@ async function captureMeetingWindow() {
             )
             if (match) {
                 console.log('[Screenshot] Found meeting window:', match.name)
-                return { image: match.thumbnail.toDataURL(), windowName: match.name }
+                return { success: true, image: match.thumbnail.toDataURL(), windowName: match.name }
             }
         }
 
@@ -160,7 +163,7 @@ async function captureMeetingWindow() {
             )
             if (match) {
                 console.log('[Screenshot] Found browser window:', match.name)
-                return { image: match.thumbnail.toDataURL(), windowName: match.name }
+                return { success: true, image: match.thumbnail.toDataURL(), windowName: match.name }
             }
         }
 
@@ -170,15 +173,15 @@ async function captureMeetingWindow() {
         const screen = sources.find(s => s.id.startsWith('screen:'))
         if (screen) {
             console.log('[Screenshot] Window not found. Falling back to PRIMARY SCREEN:', screen.name)
-            return { image: screen.thumbnail.toDataURL(), windowName: 'Active Screen (Fallback)' }
+            return { success: true, image: screen.thumbnail.toDataURL(), windowName: 'Active Screen (Fallback)' }
         }
 
         console.warn('[Screenshot] No suitable window or screen found')
-        return { image: null, windowName: null }
+        return { success: false, image: null, windowName: null }
 
     } catch (error) {
         console.error('[Screenshot] Smart capture failed:', error)
-        return { image: null, windowName: null }
+        return { success: false, image: null, windowName: null }
     }
 }
 

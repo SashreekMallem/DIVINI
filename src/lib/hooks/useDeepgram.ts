@@ -340,14 +340,27 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
                     throw new Error('Universal System Audio requires the Electron app')
                 }
 
-                // Enable loopback mode in main process
-                await electron.stealthAudio.enable()
+                // Enable loopback mode in main process (wrapped for better error handling)
+                try {
+                    await electron.stealthAudio.enable()
+                    console.log('✅ Native loopback enabled')
+                } catch (loopbackErr: any) {
+                    console.error('❌ Native loopback failed:', loopbackErr)
+                    throw new Error('Native audio module failed. Please select a specific window/tab instead of Universal System Audio.')
+                }
 
                 // Get the loopback stream - library intercepts this call
-                const loopbackStream = await navigator.mediaDevices.getDisplayMedia({
-                    audio: true,
-                    video: true // Required by library
-                })
+                let loopbackStream: MediaStream
+                try {
+                    loopbackStream = await navigator.mediaDevices.getDisplayMedia({
+                        audio: true,
+                        video: true // Required by library
+                    })
+                } catch (displayErr: any) {
+                    console.error('❌ getDisplayMedia failed:', displayErr)
+                    await electron.stealthAudio.disable().catch(() => { })
+                    throw new Error('Screen capture was cancelled or denied. Please try again.')
+                }
 
                 // Disable loopback mode (restore normal behavior)
                 await electron.stealthAudio.disable()
