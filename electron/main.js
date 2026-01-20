@@ -149,7 +149,7 @@ function registerGlobalShortcuts() {
 
         console.log('[Hotkey] Capture shortcut triggered')
         if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('trigger-capture')
+            mainWindow.webContents.send('capture:hotkeyTriggered')
             if (!mainWindow.isVisible()) {
                 mainWindow.show()
                 stealthManager.manualRestore()
