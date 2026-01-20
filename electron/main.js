@@ -30,6 +30,10 @@ function createWindow() {
 
     stealthManager = new StealthManager(mainWindow)
 
+    // Allow the window to follow the user across all macOS Spaces / Virtual Desktops
+    // This is critical for seeing windows that are in Full Screen mode
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+
     if (app.isPackaged) {
         console.log(`[App] Loading production URL: ${APP_URL}`)
         mainWindow.loadURL(APP_URL)

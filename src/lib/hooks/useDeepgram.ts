@@ -328,7 +328,68 @@ export function useDeepgram({ onTranscript, onUtteranceEnd, onError }: DeepgramC
                 }
             })
 
-            // 2. Get system audio using Electron's desktopCapturer source
+            // 2. Handling System Audio (The "Set and Forget" Logic)
+
+            // Check if user selected the Universal System Audio option
+            if (sourceId === 'universal-system-audio' || sourceId === 'system-loopback') {
+                console.log('🔊 Universal System Audio selected! Using native loopback...')
+
+                // Check if running in Electron with stealth audio support
+                const electron = typeof window !== 'undefined' ? (window as any).electron : null
+                if (!electron?.stealthAudio) {
+                    throw new Error('Universal System Audio requires the Electron app')
+                }
+
+                // Enable loopback mode in main process
+                await electron.stealthAudio.enable()
+
+                // Get the loopback stream - library intercepts this call
+                const loopbackStream = await navigator.mediaDevices.getDisplayMedia({
+                    audio: true,
+                    video: true // Required by library
+                })
+
+                // Disable loopback mode (restore normal behavior)
+                await electron.stealthAudio.disable()
+
+                console.log('✅ Native audio loopback stream acquired')
+
+                const audioTracks = loopbackStream.getAudioTracks()
+                if (audioTracks.length === 0) {
+                    throw new Error('No audio track in loopback stream')
+                }
+
+                // Stop video immediately
+                loopbackStream.getVideoTracks().forEach(t => t.stop())
+
+                // ===== Setup both channels =====
+
+                // Mic channel (You) - using the micStream we already captured at the top
+                console.log('🔌 Connecting mic to Deepgram...')
+                const micSocket = await createDeepgramSocket('You')
+                micSocketRef.current = micSocket
+                micStreamRef.current = micStream
+                setupAudioPipeline(micStream, micSocket, micContextRef, micGainRef)
+                console.log('✅ Mic ready (Your voice)')
+
+                // System audio channel (Interviewer)
+                console.log('🔌 Connecting system audio to Deepgram...')
+                const sysSocket = await createDeepgramSocket('Interviewer')
+                sysSocketRef.current = sysSocket
+
+                const sysStream = new MediaStream(audioTracks)
+                sysStreamRef.current = sysStream
+
+                setupAudioPipeline(sysStream, sysSocket, sysContextRef)
+                console.log('✅ System audio ready (Interviewer voice)')
+
+                setStatus('connected')
+                setIsProcessing(true)
+                console.log('🎉 Universal System Audio active! Both channels working.')
+                return // Exit - we've handled everything
+            }
+
+            // Standard Window/Tab Audio (Legacy / Specific Window)
             // @ts-ignore - Electron-specific API
             const displayStream = await navigator.mediaDevices.getUserMedia({
                 audio: false,
