@@ -46,6 +46,13 @@ interface CoachingEntry {
     question: string
     answer: string
     timestamp: Date
+    type?: 'behavioral' | 'technical' | 'coding'
+    codingMetadata?: {
+        language: string
+        complexity: string
+        approach: string
+        problemType: string
+    }
 }
 
 interface InterviewWithRelations extends Interview {
@@ -815,6 +822,26 @@ export default function InterviewSessionPage() {
                         console.error('Failed to save coding answer:', answerError)
                     } else {
                         console.log('💾 Coding solution saved to database')
+
+                        // Integrate coding solution into conversation context
+                        const solutionSummary = phase2Data.result.approach || 'Solution generated'
+                        const codeSummary = phase2Data.result.code?.substring(0, 500) || ''
+
+                        setCoaching(prev => [...prev, {
+                            id: Date.now().toString(),
+                            questionId: questionData.id,
+                            question: `[CODING PROBLEM] ${phase1Data.result.problem || 'Coding challenge'}`,
+                            answer: `[SOLUTION] Approach: ${solutionSummary}\n\nComplexity: ${phase2Data.result.complexity || 'N/A'}\n\nCode:\n${codeSummary}${codeSummary.length >= 500 ? '...' : ''}`,
+                            timestamp: new Date(),
+                            type: 'coding',
+                            codingMetadata: {
+                                language: phase2Data.result.language || 'unknown',
+                                complexity: phase2Data.result.complexity || 'N/A',
+                                approach: phase2Data.result.approach || 'N/A',
+                                problemType: phase1Data.result.problemType || 'algorithm'
+                            }
+                        }])
+                        console.log('📚 Coding solution added to conversation context')
                     }
                 }
             } catch (saveError) {

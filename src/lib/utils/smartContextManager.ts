@@ -30,17 +30,21 @@ export interface SessionMemory {
         gapsIdentified: string[]
         strengthsHighlighted: string[]
         projectsDiscussed: string[]
+        // Coding-specific facts
+        algorithmsUsed: string[]
+        dataStructuresUsed: string[]
+        complexityAnalysis: string[]
     }
-    
+
     // AI-generated conversation summary
     conversationSummary: string
-    
+
     // Questions asked (for deduplication)
     questionsAsked: string[]
-    
+
     // AI-identified behavioral patterns
     behavioralNotes: string[]
-    
+
     // Last updated
     lastUpdated: Date
 }
@@ -56,14 +60,14 @@ export interface MultiRoundMemory {
         gapsIdentified: string[]
         questionsAsked: number
     }[]
-    
+
     // AI-identified improvement trajectory
     improvementNotes: string[]
-    
+
     // AI-identified cross-round patterns
     consistentStrengths: string[]
     persistentGaps: string[]
-    
+
     // AI-generated summary
     overallSummary: string
 }
@@ -78,12 +82,12 @@ async function callGeminiForSummary(prompt: string): Promise<string> {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt }),
         })
-        
+
         if (!response.ok) {
             console.warn('⚠️ Gemini summarization failed, using fallback')
             return ''
         }
-        
+
         const data = await response.json()
         return data.summary || ''
     } catch (error) {
@@ -101,21 +105,27 @@ export async function generateSessionMemory(
     existingMemory: SessionMemory | null = null
 ): Promise<SessionMemory> {
     // Prepare Q&A text for Gemini with CLEAR ROLE LABELS
-    const qaText = qas.map((qa, i) => 
-        `INTERVIEWER_QUESTION_${i + 1}: ${qa.question}\nAI_SUGGESTED_ANSWER_${i + 1}: ${qa.answer}`
-    ).join('\n\n')
-    
+    // Handle coding entries differently
+    const qaText = qas.map((qa, i) => {
+        if (qa.question.startsWith('[CODING PROBLEM]')) {
+            return `CODING_PROBLEM_${i + 1}: ${qa.question}\nCANDIDATE_SOLUTION_${i + 1}: ${qa.answer}`
+        }
+        return `INTERVIEWER_QUESTION_${i + 1}: ${qa.question}\nAI_SUGGESTED_ANSWER_${i + 1}: ${qa.answer}`
+    }).join('\n\n')
+
     // Ask Gemini to extract key facts in JSON format
     const extractionPrompt = `You are analyzing an interview conversation to extract key facts.
 
 CONTEXT EXPLANATION:
 - INTERVIEWER_QUESTION: What the interviewer asked
 - AI_SUGGESTED_ANSWER: What AI generated for the candidate to read/say
+- CODING_PROBLEM: A coding challenge the candidate was given
+- CANDIDATE_SOLUTION: The solution the candidate provided
 
 INTERVIEW Q&A FROM CURRENT ROUND:
 ${qaText}
 
-Extract the following in JSON format. Be specific and concise. Only include what was ACTUALLY mentioned in the AI_SUGGESTED_ANSWER responses:
+Extract the following in JSON format. Be specific and concise. Only include what was ACTUALLY mentioned:
 
 {
     "achievements": ["specific achievements with metrics if available"],
@@ -126,13 +136,16 @@ Extract the following in JSON format. Be specific and concise. Only include what
     "strengths": ["strengths highlighted"],
     "weaknesses": ["weaknesses or areas for improvement mentioned"],
     "keyThemes": ["main themes or patterns"],
+    "algorithmsUsed": ["algorithms mentioned in coding solutions, e.g. dynamic programming, binary search"],
+    "dataStructures": ["data structures used, e.g. hash map, tree, graph"],
+    "complexityAnalysis": ["time/space complexity mentioned, e.g. O(n), O(n log n)"],
     "summary": "2-3 sentence summary of what the candidate discussed"
 }
 
 Return ONLY valid JSON, no markdown or explanation.`
 
     const geminiResponse = await callGeminiForSummary(extractionPrompt)
-    
+
     // Parse Gemini response
     let extracted: any = {}
     try {
@@ -145,7 +158,7 @@ Return ONLY valid JSON, no markdown or explanation.`
         console.warn('⚠️ Could not parse Gemini JSON, using fallback extraction')
         extracted = fallbackExtraction(qas)
     }
-    
+
     // Build session memory from Gemini extraction
     const memory: SessionMemory = {
         keyFacts: {
@@ -157,13 +170,17 @@ Return ONLY valid JSON, no markdown or explanation.`
             gapsIdentified: extracted.weaknesses || [],
             strengthsHighlighted: extracted.strengths || [],
             projectsDiscussed: extracted.projects || [],
+            // Coding-specific facts
+            algorithmsUsed: extracted.algorithmsUsed || [],
+            dataStructuresUsed: extracted.dataStructures || [],
+            complexityAnalysis: extracted.complexityAnalysis || [],
         },
         conversationSummary: extracted.summary || `Discussed ${qas.length} questions.`,
         questionsAsked: qas.map(qa => qa.question),
         behavioralNotes: extracted.keyThemes || [],
         lastUpdated: new Date(),
     }
-    
+
     // Merge with existing memory if provided
     if (existingMemory) {
         memory.keyFacts.achievementsMentioned = [...new Set([...existingMemory.keyFacts.achievementsMentioned, ...memory.keyFacts.achievementsMentioned])]
@@ -173,17 +190,21 @@ Return ONLY valid JSON, no markdown or explanation.`
         memory.keyFacts.gapsIdentified = [...new Set([...existingMemory.keyFacts.gapsIdentified, ...memory.keyFacts.gapsIdentified])]
         memory.keyFacts.strengthsHighlighted = [...new Set([...existingMemory.keyFacts.strengthsHighlighted, ...memory.keyFacts.strengthsHighlighted])]
         memory.keyFacts.projectsDiscussed = [...new Set([...existingMemory.keyFacts.projectsDiscussed, ...memory.keyFacts.projectsDiscussed])]
+        // Merge coding facts
+        memory.keyFacts.algorithmsUsed = [...new Set([...(existingMemory.keyFacts.algorithmsUsed || []), ...memory.keyFacts.algorithmsUsed])]
+        memory.keyFacts.dataStructuresUsed = [...new Set([...(existingMemory.keyFacts.dataStructuresUsed || []), ...memory.keyFacts.dataStructuresUsed])]
+        memory.keyFacts.complexityAnalysis = [...new Set([...(existingMemory.keyFacts.complexityAnalysis || []), ...memory.keyFacts.complexityAnalysis])]
         memory.questionsAsked = [...new Set([...existingMemory.questionsAsked, ...memory.questionsAsked])]
         memory.behavioralNotes = [...new Set([...existingMemory.behavioralNotes, ...memory.behavioralNotes])]
     }
-    
+
     console.log('🧠 Session memory generated via Gemini:', {
         achievements: memory.keyFacts.achievementsMentioned.length,
         skills: memory.keyFacts.technicalSkillsVerified.length,
         metrics: memory.keyFacts.numbersAndMetrics.length,
         gaps: memory.keyFacts.gapsIdentified.length,
     })
-    
+
     return memory
 }
 
@@ -193,7 +214,7 @@ Return ONLY valid JSON, no markdown or explanation.`
 function fallbackExtraction(qas: { question: string; answer: string }[]): any {
     const allText = qas.map(qa => qa.answer).join(' ')
     const numbers = allText.match(/\d+%|\$?\d+[MKk]?|\d+\s*(people|team|engineers|users|years?)/gi) || []
-    
+
     return {
         achievements: [],
         technicalSkills: [],
@@ -221,13 +242,13 @@ export async function generateMultiRoundSummary(
     }[]
 ): Promise<string> {
     if (rounds.length === 0) return ''
-    
-    const roundsText = rounds.map(r => 
+
+    const roundsText = rounds.map(r =>
         `Round ${r.roundNumber} (${r.roundName || r.interviewType}): ${r.questionsAsked} questions. ` +
         `Highlights: ${r.keyHighlights.join(', ')}. ` +
         `Areas to improve: ${r.gapsIdentified.join(', ')}`
     ).join('\n')
-    
+
     const summaryPrompt = `Summarize this candidate's interview history across multiple rounds.
 
 PREVIOUS ROUNDS:
@@ -263,7 +284,7 @@ export function buildSmartContext(params: {
     contextParts: string[]
 } {
     const contextParts: string[] = []
-    
+
     // ROLE DEFINITIONS HEADER
     contextParts.push(`=== CONTEXT ROLE DEFINITIONS ===
 INTERVIEWER_QUESTION: What the interviewer asked in the interview
@@ -273,7 +294,7 @@ USER_ACTUAL_RESPONSE: What the candidate actually said (if captured)
 CURRENT_ROUND: This is Round ${params.currentRoundNumber} of this job application
 PREVIOUS_ROUNDS: Context from earlier rounds (if any) - candidate already said these things
 === END DEFINITIONS ===`)
-    
+
     // 1. Resume
     if (params.resumeContent) {
         contextParts.push(`=== CANDIDATE RESUME ===
@@ -281,7 +302,7 @@ This is the candidate's actual resume/background:
 ${params.resumeContent}
 === END RESUME ===`)
     }
-    
+
     // 2. Job Description
     if (params.jobDescription) {
         contextParts.push(`=== JOB DESCRIPTION ===
@@ -289,7 +310,7 @@ This is the job the candidate is interviewing for:
 ${params.jobDescription}
 === END JOB DESCRIPTION ===`)
     }
-    
+
     // 3. Company Info
     if (params.companyName) {
         let companySection = `=== COMPANY INFO ===
@@ -300,38 +321,56 @@ Company: ${params.companyName}`
         companySection += `\n=== END COMPANY INFO ===`
         contextParts.push(companySection)
     }
-    
+
     // 4. PREVIOUS ROUNDS (if this is Round 2+)
     if (params.multiRoundMemory && params.multiRoundMemory.rounds.length > 0) {
         const multiRoundText = formatMultiRoundMemory(params.multiRoundMemory, params.currentRoundNumber)
         contextParts.push(multiRoundText)
     }
-    
+
     // 5. SESSION SUMMARY (AI-extracted facts from current round)
     if (params.sessionMemory) {
         const sessionText = formatSessionMemory(params.sessionMemory, params.currentRoundNumber)
         contextParts.push(sessionText)
     }
-    
+
     // 6. CURRENT ROUND Q&A (all Q&A from this round with clear labels)
     if (params.allQAs.length > 0) {
-        const qaText = params.allQAs.map((qa, i) => 
+        // Separate coding problems from regular Q&A
+        const regularQAs = params.allQAs.filter(qa => !qa.question.startsWith('[CODING PROBLEM]'))
+        const codingQAs = params.allQAs.filter(qa => qa.question.startsWith('[CODING PROBLEM]'))
+
+        const qaText = regularQAs.map((qa, i) =>
             `INTERVIEWER_QUESTION_${i + 1}: ${qa.question}\nAI_SUGGESTED_ANSWER_${i + 1}: ${qa.answer}`
         ).join('\n\n')
-        
-        contextParts.push(`=== CURRENT ROUND ${params.currentRoundNumber} - Q&A HISTORY ===
+
+        if (regularQAs.length > 0) {
+            contextParts.push(`=== CURRENT ROUND ${params.currentRoundNumber} - Q&A HISTORY ===
 These are questions already asked in THIS interview round:
 ${qaText}
 === END CURRENT ROUND Q&A ===`)
+        }
+
+        // Add coding problems as a separate section
+        if (codingQAs.length > 0) {
+            const codingText = codingQAs.map((qa, i) =>
+                `CODING_PROBLEM_${i + 1}: ${qa.question}\nCANDIDATE_SOLUTION_${i + 1}: ${qa.answer}`
+            ).join('\n\n')
+
+            contextParts.push(`=== CODING PROBLEMS SOLVED IN THIS ROUND ===
+These coding challenges were solved by the candidate:
+${codingText}
+=== END CODING PROBLEMS ===`)
+        }
     }
-    
+
     // 7. Current Transcript (live conversation)
     if (params.currentTranscript) {
         contextParts.push(`=== LIVE TRANSCRIPT (CURRENT CONVERSATION) ===
 ${params.currentTranscript}
 === END TRANSCRIPT ===`)
     }
-    
+
     return { contextParts }
 }
 
@@ -341,46 +380,59 @@ ${params.currentTranscript}
 function formatSessionMemory(memory: SessionMemory, currentRoundNumber: number): string {
     const parts: string[] = [`=== ROUND ${currentRoundNumber} - AI-EXTRACTED SUMMARY ===
 This is what AI has extracted from the current round so far:`]
-    
+
     if (memory.conversationSummary) {
         parts.push(`\nSUMMARY: ${memory.conversationSummary}`)
     }
-    
+
     if (memory.keyFacts.achievementsMentioned.length > 0) {
         parts.push(`\nACHIEVEMENTS CANDIDATE DISCUSSED:`)
         memory.keyFacts.achievementsMentioned.forEach(a => parts.push(`• ${a}`))
     }
-    
+
     if (memory.keyFacts.technicalSkillsVerified.length > 0) {
         parts.push(`\nTECHNICAL SKILLS MENTIONED: ${memory.keyFacts.technicalSkillsVerified.join(', ')}`)
     }
-    
+
     if (memory.keyFacts.projectsDiscussed.length > 0) {
         parts.push(`\nPROJECTS DISCUSSED: ${memory.keyFacts.projectsDiscussed.join(', ')}`)
     }
-    
+
+    // Coding-specific facts
+    if (memory.keyFacts.algorithmsUsed?.length > 0) {
+        parts.push(`\nALGORITHMS USED: ${memory.keyFacts.algorithmsUsed.join(', ')}`)
+    }
+
+    if (memory.keyFacts.dataStructuresUsed?.length > 0) {
+        parts.push(`\nDATA STRUCTURES USED: ${memory.keyFacts.dataStructuresUsed.join(', ')}`)
+    }
+
+    if (memory.keyFacts.complexityAnalysis?.length > 0) {
+        parts.push(`\nCOMPLEXITY ANALYSIS: ${memory.keyFacts.complexityAnalysis.join(', ')}`)
+    }
+
     if (memory.keyFacts.companiesDiscussed.length > 0) {
         parts.push(`\nCOMPANIES MENTIONED: ${memory.keyFacts.companiesDiscussed.join(', ')}`)
     }
-    
+
     if (memory.keyFacts.numbersAndMetrics.length > 0) {
         parts.push(`\nKEY METRICS/NUMBERS: ${memory.keyFacts.numbersAndMetrics.join(', ')}`)
     }
-    
+
     if (memory.keyFacts.strengthsHighlighted.length > 0) {
         parts.push(`\nSTRENGTHS HIGHLIGHTED: ${memory.keyFacts.strengthsHighlighted.join(', ')}`)
     }
-    
+
     if (memory.keyFacts.gapsIdentified.length > 0) {
         parts.push(`\nWEAKNESSES/GAPS DISCUSSED: ${memory.keyFacts.gapsIdentified.join(', ')}`)
     }
-    
+
     if (memory.behavioralNotes.length > 0) {
         parts.push(`\nKEY THEMES: ${memory.behavioralNotes.join(', ')}`)
     }
-    
+
     parts.push(`\n=== END ROUND ${currentRoundNumber} SUMMARY ===`)
-    
+
     return parts.join('\n')
 }
 
@@ -391,7 +443,7 @@ function formatMultiRoundMemory(memory: MultiRoundMemory, currentRoundNumber: nu
     const parts: string[] = [`=== PREVIOUS ROUNDS CONTEXT (BEFORE ROUND ${currentRoundNumber}) ===
 IMPORTANT: This is what the candidate ALREADY said in previous rounds.
 Use this to maintain consistency - don't contradict what was said before.`]
-    
+
     parts.push(`\nCandidate has completed ${memory.rounds.length} previous round(s):`)
     memory.rounds.forEach(round => {
         parts.push(`\n--- ROUND ${round.roundNumber}: ${round.roundName || round.interviewType} ---`)
@@ -406,25 +458,25 @@ Use this to maintain consistency - don't contradict what was said before.`]
             parts.push(`Areas Identified for Improvement: ${round.gapsIdentified.join(', ')}`)
         }
     })
-    
+
     if (memory.consistentStrengths.length > 0) {
         parts.push(`\nCONSISTENT STRENGTHS ACROSS ROUNDS: ${memory.consistentStrengths.join('; ')}`)
     }
-    
+
     if (memory.persistentGaps.length > 0) {
         parts.push(`\nPERSISTENT AREAS TO IMPROVE: ${memory.persistentGaps.join('; ')}`)
     }
-    
+
     if (memory.improvementNotes.length > 0) {
         parts.push(`\nIMPROVEMENT TRAJECTORY: ${memory.improvementNotes.join('; ')}`)
     }
-    
+
     if (memory.overallSummary) {
         parts.push(`\nOVERALL: ${memory.overallSummary}`)
     }
-    
+
     parts.push(`\n=== END PREVIOUS ROUNDS CONTEXT ===`)
-    
+
     return parts.join('\n')
 }
 
@@ -438,19 +490,19 @@ export async function saveInterviewSummary(
     qas: { question: string; answer: string }[]
 ) {
     const supabase = createClient()
-    
+
     const strengths = [
         ...sessionMemory.keyFacts.strengthsHighlighted,
         ...sessionMemory.keyFacts.achievementsMentioned
     ]
-    
+
     const weaknesses = sessionMemory.keyFacts.gapsIdentified
-    
-    const keyInsights = sessionMemory.conversationSummary || 
+
+    const keyInsights = sessionMemory.conversationSummary ||
         `${qas.length} questions answered. ` +
         (sessionMemory.keyFacts.achievementsMentioned.length > 0 ? `Achievements: ${sessionMemory.keyFacts.achievementsMentioned.join(', ')}. ` : '') +
         (sessionMemory.keyFacts.technicalSkillsVerified.length > 0 ? `Skills: ${sessionMemory.keyFacts.technicalSkillsVerified.join(', ')}. ` : '')
-    
+
     const { error } = await supabase
         .from('interview_summaries')
         .upsert({
@@ -465,7 +517,7 @@ export async function saveInterviewSummary(
         }, {
             onConflict: 'interview_id'
         })
-    
+
     if (error) {
         console.error('Error saving interview summary:', error)
     } else {
@@ -483,7 +535,7 @@ export async function loadMultiRoundMemory(
     currentInterviewId: string
 ): Promise<MultiRoundMemory | null> {
     const supabase = createClient()
-    
+
     let query = supabase
         .from('interviews')
         .select(`
@@ -499,7 +551,7 @@ export async function loadMultiRoundMemory(
         .eq('user_id', userId)
         .neq('id', currentInterviewId)
         .order('round_number', { ascending: true })
-    
+
     if (applicationId) {
         query = query.eq('application_id', applicationId)
     } else if (companyId) {
@@ -507,13 +559,13 @@ export async function loadMultiRoundMemory(
     } else {
         return null
     }
-    
+
     const { data: previousInterviews, error } = await query
-    
+
     if (error || !previousInterviews || previousInterviews.length === 0) {
         return null
     }
-    
+
     const memory: MultiRoundMemory = {
         rounds: [],
         improvementNotes: [],
@@ -521,13 +573,13 @@ export async function loadMultiRoundMemory(
         persistentGaps: [],
         overallSummary: '',
     }
-    
+
     const allStrengths: string[] = []
     const allGaps: string[] = []
-    
+
     previousInterviews.forEach((interview: any) => {
         const summary = interview.interview_summaries?.[0]
-        
+
         memory.rounds.push({
             roundNumber: interview.round_number || 1,
             roundName: interview.round_name,
@@ -538,20 +590,20 @@ export async function loadMultiRoundMemory(
             gapsIdentified: summary?.weaknesses || [],
             questionsAsked: summary?.question_count || interview.total_questions || 0,
         })
-        
+
         if (summary?.strengths) allStrengths.push(...summary.strengths)
         if (summary?.weaknesses) allGaps.push(...summary.weaknesses)
     })
-    
+
     memory.consistentStrengths = findFrequentItems(allStrengths, 2)
     memory.persistentGaps = findFrequentItems(allGaps, 2)
-    
+
     if (memory.rounds.length > 1) {
         memory.overallSummary = await generateMultiRoundSummary(memory.rounds)
     } else {
         memory.overallSummary = `Completed ${memory.rounds.length} previous round.`
     }
-    
+
     return memory
 }
 
@@ -564,7 +616,7 @@ function findFrequentItems(items: string[], minCount: number): string[] {
         const key = item.toLowerCase().substring(0, 50)
         counts.set(key, (counts.get(key) || 0) + 1)
     })
-    
+
     return Array.from(counts.entries())
         .filter(([_, count]) => count >= minCount)
         .sort((a, b) => b[1] - a[1])
