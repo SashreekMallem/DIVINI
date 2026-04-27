@@ -1,36 +1,28 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DIVINI — AI Interview & Job Application Intelligence
 
-## Getting Started
+A desktop app for job seekers built on Electron + Next.js. Tracks your application pipeline, records and analyses interview sessions, and surfaces AI coaching insights from what was actually said.
 
-First, run the development server:
+## What it does
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+Most interview prep tools give you generic advice. DIVINI records your real interviews and tells you what happened — what you said well, what you missed, where you rambled.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- **Interview recording** — Real-time audio capture via Deepgram with low-latency transcription
+- **AI answer generation** — Live AI-powered answer suggestions during interview sessions
+- **Post-session analysis** — Multi-modal AI flows analyse transcripts to surface coaching insights
+- **Resume parsing** — Upload a resume, get structured extraction of experience and skills
+- **Coding assistant** — Integrated coding solution panel for technical interviews
+- **Application tracker** — Full pipeline view across all active applications
+- **Analytics dashboard** — Interview performance trends over time
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Tech stack
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Desktop** — Electron with custom IPC bridge
+- **Frontend** — Next.js, TypeScript, Tailwind CSS, shadcn/ui
+- **Audio** — Deepgram real-time transcription, Web Audio API worklet
+- **AI** — Supabase Edge Functions (Deno) for answer generation, resume parsing, context summarisation
+- **Database** — Supabase (Postgres + Auth)
+- **Admin** — Full admin panel with user management, interview analytics, pricing controls
 
-## Learn More
+## Architecture note
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Audio capture runs in a dedicated Web Audio worklet to avoid blocking the main thread. The context manager maintains a rolling window of transcript segments and compresses them before sending to the AI layer — keeping token costs bounded during long sessions. On-device inference via vLLM was evaluated for privacy of recorded sessions; cloud AI was selected for latency and model quality at current scale.
